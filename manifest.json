@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Console Key Logger",
+  "version": "1.0",
+  "description": "Logs keys typed to the console",
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["detect.js"]
+    }
+  ],
+  "icons": {
+    "16": "icon16.png"
+  }
+} 
