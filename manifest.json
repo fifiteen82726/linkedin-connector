@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Console Key Logger",
+  "name": "Linkedin Invite",
   "version": "1.0",
-  "description": "Logs keys typed to the console",
+  "description": "Linkedin Invite Automation",
   "content_scripts": [
     {
       "matches": ["<all_urls>"],

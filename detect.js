@@ -360,6 +360,36 @@ I'm Sunny, currently a Data Engineer at American Airlines. Impressed by your bac
   const inputEvent = new Event('input', { bubbles: true });
   textarea.dispatchEvent(inputEvent);
   
+  // Add delay before clicking Send button to ensure message is filled
+  setTimeout(() => {
+    // Find the Send button using multiple selectors
+    const sendButtonSelectors = [
+      'button[aria-label="Send invitation"]',
+      '.artdeco-button--primary',
+      'button.artdeco-button--primary'
+    ];
+
+    let sendButton = null;
+    for (const selector of sendButtonSelectors) {
+      const buttons = document.querySelectorAll(selector);
+      for (const button of buttons) {
+        if (button.textContent.trim() === 'Send') {
+          sendButton = button;
+          break;
+        }
+      }
+      if (sendButton) break;
+    }
+
+    if (sendButton) {
+      console.log('Clicking Send button...');
+      sendButton.click();
+      console.log('%c CONNECTION REQUEST SENT!', 'background: #4CAF50; color: #ffffff; font-size: 16px; font-weight: bold;');
+    } else {
+      console.log('%c SEND BUTTON NOT FOUND', 'background: #FFC107; color: #000000; font-size: 16px; font-weight: bold;');
+    }
+  }, 500); // Wait 500ms to ensure message is filled before clicking Send
+
   console.log('%c AUTOMATION COMPLETE', 'background: #4CAF50; color: #ffffff; font-size: 16px; font-weight: bold;');
 }
 
