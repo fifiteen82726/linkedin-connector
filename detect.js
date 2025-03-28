@@ -9,13 +9,15 @@ document.addEventListener('keydown', function(event) {
     console.log('Alt key pressed');
   }
   
-  // Check for hotkey combination (Alt+W) using the code which is consistent
-  // regardless of the character produced
-  if (altKeyPressed && event.code === 'KeyW') {
-    console.log('%c HOTKEY "Alt+W" DETECTED! ', 'background: #ff0000; color: #ffffff; font-size: 16px; font-weight: bold;');
-    
-    // Call the function to find profile name and automate connection
-    automateLinkedInConnect();
+  // Check for hotkey combinations
+  if (altKeyPressed) {
+    if (event.code === 'KeyW') {
+      console.log('%c HOTKEY "Alt+W" DETECTED! (Fill and Send)', 'background: #ff0000; color: #ffffff; font-size: 16px; font-weight: bold;');
+      automateLinkedInConnect(true); // true means fill and send
+    } else if (event.code === 'KeyQ') {
+      console.log('%c HOTKEY "Alt+Q" DETECTED! (Fill Only)', 'background: #ff0000; color: #ffffff; font-size: 16px; font-weight: bold;');
+      automateLinkedInConnect(false); // false means fill only
+    }
   }
   
   // Log the key pressed
@@ -164,7 +166,7 @@ function findConnectButton() {
 }
 
 // Function to find and click Connect in main profile
-function findAndClickConnect() {
+function findAndClickConnect(shouldSend = true) {
   console.log("Looking for Connect button in main profile...");
   
   // Find direct Connect button in main profile
@@ -189,7 +191,7 @@ function findAndClickConnect() {
     console.log("Connect button clicked");
     
     // Wait for the modal and continue with Add note
-    setTimeout(handleAddNote, 1000);
+    setTimeout(() => handleAddNote(shouldSend), 1000);
     return;
   }
   
@@ -209,7 +211,7 @@ function findAndClickConnect() {
         connectOption.click();
         
         // Wait for the modal and continue with Add note
-        setTimeout(handleAddNote, 1000);
+        setTimeout(() => handleAddNote(shouldSend), 1000);
       } else {
         console.log("Connect option not found in dropdown");
       }
@@ -277,7 +279,7 @@ function findConnectInDropdown() {
 }
 
 // Function to automate LinkedIn connection
-function automateLinkedInConnect() {
+function automateLinkedInConnect(shouldSend = true) {
   // Find profile name first
   const name = findProfileName();
   if (!name) {
@@ -288,11 +290,11 @@ function automateLinkedInConnect() {
   console.log('%c PROFILE NAME: ' + name, 'background: #4CAF50; color: #ffffff; font-size: 16px; font-weight: bold;');
   
   // Step 1: Find and click the Connect button in main profile
-  findAndClickConnect();
+  findAndClickConnect(shouldSend);
 }
 
 // Function to handle the Add Note flow
-function handleAddNote() {
+function handleAddNote(shouldSend = true) {
   const addNoteButton = findAddNoteButton();
   if (!addNoteButton) {
     console.log('%c ADD NOTE BUTTON NOT FOUND', 'background: #FFC107; color: #000000; font-size: 16px; font-weight: bold;');
@@ -305,10 +307,10 @@ function handleAddNote() {
       console.log('Closing open modal before retrying...');
       closeButtons[0].click();
       // Give it a moment to close
-      setTimeout(findAndClickConnect, 500);
+      setTimeout(() => findAndClickConnect(shouldSend), 500);
     } else {
       // Just retry directly
-      findAndClickConnect();
+      findAndClickConnect(shouldSend);
     }
     return;
   }
@@ -318,12 +320,12 @@ function handleAddNote() {
   
   // Step 3: Wait for the textarea to appear and fill it with the name
   setTimeout(() => {
-    fillCustomMessage();
-  }, 500); // Wait for textarea to be available
+    fillCustomMessage(shouldSend);
+  }, 500);
 }
 
 // Function to fill the custom message
-function fillCustomMessage() {
+function fillCustomMessage(shouldSend = true) {
   // Different selectors for the textarea
   const textareaSelectors = [
     'textarea#custom-message',
@@ -360,37 +362,45 @@ I'm Sunny, currently a Data Engineer at American Airlines. Impressed by your bac
   const inputEvent = new Event('input', { bubbles: true });
   textarea.dispatchEvent(inputEvent);
   
-  // Add delay before clicking Send button to ensure message is filled
-  setTimeout(() => {
-    // Find the Send button using multiple selectors
-    const sendButtonSelectors = [
-      'button[aria-label="Send invitation"]',
-      '.artdeco-button--primary',
-      'button.artdeco-button--primary'
-    ];
+  if (shouldSend) {
+    // Add delay before clicking Send button to ensure message is filled
+    setTimeout(() => {
+      // Find the Send button using multiple selectors
+      const sendButtonSelectors = [
+        'button[aria-label="Send invitation"]',
+        '.artdeco-button--primary',
+        'button.artdeco-button--primary'
+      ];
 
-    let sendButton = null;
-    for (const selector of sendButtonSelectors) {
-      const buttons = document.querySelectorAll(selector);
-      for (const button of buttons) {
-        if (button.textContent.trim() === 'Send') {
-          sendButton = button;
-          break;
+      let sendButton = null;
+      for (const selector of sendButtonSelectors) {
+        const buttons = document.querySelectorAll(selector);
+        for (const button of buttons) {
+          if (button.textContent.trim() === 'Send') {
+            sendButton = button;
+            break;
+          }
         }
+        if (sendButton) break;
       }
-      if (sendButton) break;
-    }
 
-    if (sendButton) {
-      console.log('Clicking Send button...');
-      sendButton.click();
-      console.log('%c CONNECTION REQUEST SENT!', 'background: #4CAF50; color: #ffffff; font-size: 16px; font-weight: bold;');
-    } else {
-      console.log('%c SEND BUTTON NOT FOUND', 'background: #FFC107; color: #000000; font-size: 16px; font-weight: bold;');
-    }
-  }, 500); // Wait 500ms to ensure message is filled before clicking Send
-
-  console.log('%c AUTOMATION COMPLETE', 'background: #4CAF50; color: #ffffff; font-size: 16px; font-weight: bold;');
+      if (sendButton) {
+        console.log('Clicking Send button...');
+        sendButton.click();
+        console.log('%c CONNECTION REQUEST SENT!', 'background: #4CAF50; color: #ffffff; font-size: 16px; font-weight: bold;');
+        
+        // Wait a brief moment to ensure the send action is completed, then close the tab
+        setTimeout(() => {
+          console.log('Closing tab...');
+          window.close();
+        }, 1000); // Wait 1 second before closing
+      } else {
+        console.log('%c SEND BUTTON NOT FOUND', 'background: #FFC107; color: #000000; font-size: 16px; font-weight: bold;');
+      }
+    }, 500);
+  } else {
+    console.log('%c MESSAGE FILLED (NOT SENDING)', 'background: #4CAF50; color: #ffffff; font-size: 16px; font-weight: bold;');
+  }
 }
 
 // Helper function to find Add a note button
@@ -433,4 +443,4 @@ function getFirstName(fullName) {
 }
 
 // Log when the script is loaded
-console.log('LinkedIn Connect Automation extension activated - press Alt+W to connect');
+console.log('LinkedIn Connect Automation extension activated - press Alt+W to connect and send, Alt+Q to fill only');
