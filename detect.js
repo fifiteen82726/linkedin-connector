@@ -1,6 +1,9 @@
 // Track modifier key states
 let altKeyPressed = false;
 
+// Store selected profiles
+let selectedProfiles = [];
+
 // Listen for keydown events
 document.addEventListener('keydown', function(event) {
   // Update Alt key state
@@ -38,6 +41,409 @@ window.addEventListener('blur', function() {
   altKeyPressed = false;
   console.log('Window lost focus - reset modifier keys');
 });
+
+// Function to determine if we're on a company people page
+function isCompanyPeoplePage() {
+  return window.location.href.includes('/company/') && window.location.href.includes('/people/');
+}
+
+// Function to create "Select" buttons on profile cards
+function addSelectButtonsToProfiles() {
+  if (!isCompanyPeoplePage()) return;
+  
+  console.log('Adding select buttons to profiles on company people page');
+  
+  // Find all profile cards
+  const profileCards = document.querySelectorAll('.org-people-profile-card__profile-card-spacing');
+  
+  profileCards.forEach((card, index) => {
+    // Check if we already added a select button to this card
+    if (card.querySelector('.profile-select-button')) return;
+    
+    // Find the profile link and name
+    const profileLink = card.querySelector('a.onRHPXypfWLuNOCinrLJfqDJJJaXLBUXSKz');
+    if (!profileLink) return;
+    
+    const profileUrl = profileLink.href;
+    const nameElement = card.querySelector('.artdeco-entity-lockup__title');
+    const name = nameElement ? nameElement.textContent.trim() : `Profile ${index}`;
+    
+    // Find the footer to place our button beside the Connect button
+    const footer = card.querySelector('footer');
+    if (!footer) return;
+    
+    // Create a Select button
+    const selectButton = document.createElement('button');
+    selectButton.className = 'artdeco-button artdeco-button--2 artdeco-button--tertiary profile-select-button';
+    selectButton.style.marginTop = '8px';
+    selectButton.innerHTML = `<span class="artdeco-button__text">Select</span>`;
+    
+    // Add click handler
+    selectButton.addEventListener('click', function() {
+      const isSelected = selectedProfiles.some(profile => profile.url === profileUrl);
+      
+      if (isSelected) {
+        // Deselect
+        selectedProfiles = selectedProfiles.filter(profile => profile.url !== profileUrl);
+        selectButton.innerHTML = `<span class="artdeco-button__text">Select</span>`;
+        selectButton.classList.remove('artdeco-button--primary');
+        selectButton.classList.add('artdeco-button--tertiary');
+      } else {
+        // Select
+        selectedProfiles.push({ name, url: profileUrl });
+        selectButton.innerHTML = `<span class="artdeco-button__text">Selected ✓</span>`;
+        selectButton.classList.remove('artdeco-button--tertiary');
+        selectButton.classList.add('artdeco-button--primary');
+      }
+      
+      updateFloatingPanel();
+    });
+    
+    // Add the button to the footer
+    footer.appendChild(selectButton);
+  });
+}
+
+// Function to create and update the floating panel
+function createFloatingPanel() {
+  // Check if panel already exists
+  if (document.getElementById('selected-profiles-panel')) return;
+  
+  // Create the panel
+  const panel = document.createElement('div');
+  panel.id = 'selected-profiles-panel';
+  panel.style.position = 'fixed';
+  panel.style.bottom = '20px';
+  panel.style.right = '20px';
+  panel.style.width = '300px';
+  panel.style.maxHeight = '400px';
+  panel.style.backgroundColor = 'white';
+  panel.style.boxShadow = '0 0 10px rgba(0, 0, 0, 0.3)';
+  panel.style.borderRadius = '8px';
+  panel.style.zIndex = '9999';
+  panel.style.display = 'flex';
+  panel.style.flexDirection = 'column';
+  panel.style.overflow = 'hidden';
+  
+  // Create header
+  const header = document.createElement('div');
+  header.style.padding = '12px';
+  header.style.borderBottom = '1px solid #e0e0e0';
+  header.style.display = 'flex';
+  header.style.justifyContent = 'space-between';
+  header.style.alignItems = 'center';
+  header.style.backgroundColor = '#0a66c2';
+  header.style.color = 'white';
+  header.style.fontWeight = 'bold';
+  header.innerHTML = '<span>Selected Profiles (0)</span>';
+  
+  // Add minimize button to header
+  const minimizeButton = document.createElement('button');
+  minimizeButton.innerHTML = '−';
+  minimizeButton.style.background = 'none';
+  minimizeButton.style.border = 'none';
+  minimizeButton.style.color = 'white';
+  minimizeButton.style.fontSize = '20px';
+  minimizeButton.style.cursor = 'pointer';
+  minimizeButton.style.marginLeft = '10px';
+  minimizeButton.onclick = function() {
+    const content = document.getElementById('panel-content');
+    const footer = document.getElementById('panel-footer');
+    
+    if (content.style.display === 'none') {
+      content.style.display = 'block';
+      footer.style.display = 'flex';
+      minimizeButton.innerHTML = '−';
+    } else {
+      content.style.display = 'none';
+      footer.style.display = 'none';
+      minimizeButton.innerHTML = '+';
+    }
+  };
+  header.appendChild(minimizeButton);
+  
+  // Create content area
+  const content = document.createElement('div');
+  content.id = 'panel-content';
+  content.style.padding = '12px';
+  content.style.maxHeight = '300px';
+  content.style.overflowY = 'auto';
+  
+  // Create footer
+  const footer = document.createElement('div');
+  footer.id = 'panel-footer';
+  footer.style.padding = '12px';
+  footer.style.borderTop = '1px solid #e0e0e0';
+  footer.style.display = 'flex';
+  footer.style.justifyContent = 'space-between';
+  
+  // Create Connect All button
+  const connectAllButton = document.createElement('button');
+  connectAllButton.className = 'artdeco-button artdeco-button--2 artdeco-button--primary';
+  connectAllButton.innerHTML = '<span class="artdeco-button__text">Connect to All</span>';
+  connectAllButton.onclick = function() {
+    connectToAllSelected();
+  };
+  
+  // Create Clear All button
+  const clearAllButton = document.createElement('button');
+  clearAllButton.className = 'artdeco-button artdeco-button--2 artdeco-button--tertiary';
+  clearAllButton.innerHTML = '<span class="artdeco-button__text">Clear All</span>';
+  clearAllButton.onclick = function() {
+    selectedProfiles = [];
+    updateFloatingPanel();
+    
+    // Update all select buttons to deselected state
+    const selectButtons = document.querySelectorAll('.profile-select-button');
+    selectButtons.forEach(button => {
+      button.innerHTML = `<span class="artdeco-button__text">Select</span>`;
+      button.classList.remove('artdeco-button--primary');
+      button.classList.add('artdeco-button--tertiary');
+    });
+  };
+  
+  // Add buttons to footer
+  footer.appendChild(clearAllButton);
+  footer.appendChild(connectAllButton);
+  
+  // Assemble the panel
+  panel.appendChild(header);
+  panel.appendChild(content);
+  panel.appendChild(footer);
+  
+  // Add to the page
+  document.body.appendChild(panel);
+}
+
+// Update the floating panel with selected profiles
+function updateFloatingPanel() {
+  const panel = document.getElementById('selected-profiles-panel');
+  if (!panel) return;
+  
+  // Update header count
+  const header = panel.querySelector('div:first-child span');
+  header.textContent = `Selected Profiles (${selectedProfiles.length})`;
+  
+  // Update content
+  const content = document.getElementById('panel-content');
+  content.innerHTML = '';
+  
+  if (selectedProfiles.length === 0) {
+    content.innerHTML = '<p style="color: #666; text-align: center;">No profiles selected</p>';
+    return;
+  }
+  
+  // Create list of selected profiles
+  selectedProfiles.forEach((profile, index) => {
+    const profileItem = document.createElement('div');
+    profileItem.style.display = 'flex';
+    profileItem.style.justifyContent = 'space-between';
+    profileItem.style.alignItems = 'center';
+    profileItem.style.padding = '8px 0';
+    profileItem.style.borderBottom = index < selectedProfiles.length - 1 ? '1px solid #e0e0e0' : 'none';
+    
+    // Profile name with link
+    const nameLink = document.createElement('a');
+    nameLink.href = profile.url;
+    nameLink.target = '_blank';
+    nameLink.textContent = profile.name;
+    nameLink.style.color = '#0a66c2';
+    nameLink.style.textDecoration = 'none';
+    nameLink.style.fontWeight = 'bold';
+    
+    // Remove button
+    const removeButton = document.createElement('button');
+    removeButton.innerHTML = '✕';
+    removeButton.style.background = 'none';
+    removeButton.style.border = 'none';
+    removeButton.style.color = '#666';
+    removeButton.style.cursor = 'pointer';
+    removeButton.onclick = function() {
+      selectedProfiles = selectedProfiles.filter(p => p.url !== profile.url);
+      updateFloatingPanel();
+      
+      // Find and update the corresponding select button
+      const profileCards = document.querySelectorAll('.org-people-profile-card__profile-card-spacing');
+      for (const card of profileCards) {
+        const link = card.querySelector('a.onRHPXypfWLuNOCinrLJfqDJJJaXLBUXSKz');
+        if (link && link.href === profile.url) {
+          const selectButton = card.querySelector('.profile-select-button');
+          if (selectButton) {
+            selectButton.innerHTML = `<span class="artdeco-button__text">Select</span>`;
+            selectButton.classList.remove('artdeco-button--primary');
+            selectButton.classList.add('artdeco-button--tertiary');
+          }
+          break;
+        }
+      }
+    };
+    
+    profileItem.appendChild(nameLink);
+    profileItem.appendChild(removeButton);
+    content.appendChild(profileItem);
+  });
+}
+
+// Listen for messages from other tabs
+window.addEventListener('message', function(event) {
+  console.log('%c RECEIVED MESSAGE FROM PARENT TAB', 'background: #8e44ad; color: #ffffff; font-size: 12px; font-weight: bold;', event.data);
+  
+  if (event.data && event.data.action === 'autoConnect') {
+    console.log('%c EXECUTING AUTO-CONNECT FROM MESSAGE', 'background: #8e44ad; color: #ffffff; font-size: 14px; font-weight: bold;');
+    // Add a slight delay to ensure the page is fully loaded
+    setTimeout(() => {
+      automateLinkedInConnect(event.data.shouldSend);
+    }, 2000);
+  }
+});
+
+// Process profiles sequentially
+function processNextProfile(index) {
+  if (index >= selectedProfiles.length) {
+    console.log('%c FINISHED CONNECTING TO ALL PROFILES', 'background: #4CAF50; color: #ffffff; font-size: 14px; font-weight: bold;');
+    return;
+  }
+  
+  const profile = selectedProfiles[index];
+  console.log(`%c PROCESSING PROFILE ${index + 1}/${selectedProfiles.length}: ${profile.name}`, 'background: #3498db; color: #ffffff; font-size: 12px; font-weight: bold;');
+  
+  // Open the profile in a new tab
+  const profileTab = window.open(profile.url, '_blank');
+  
+  if (!profileTab) {
+    console.log('%c FAILED TO OPEN NEW TAB - POPUP BLOCKER?', 'background: #e74c3c; color: #ffffff; font-size: 14px; font-weight: bold;');
+    alert('Failed to open profile in new tab. Please check your popup blocker settings.');
+    return;
+  }
+  
+  console.log('%c NEW TAB OPENED, WAITING FOR PAGE LOAD', 'background: #3498db; color: #ffffff; font-size: 12px; font-weight: bold;');
+  
+  // Create a content script to inject into the new tab
+  const script = `
+    // Listen for messages from parent window
+    window.addEventListener('message', function(event) {
+      console.log("Child tab received message:", event.data);
+      if (event.data && event.data.action === 'autoConnect') {
+        // Try to find the main window's automateLinkedInConnect function
+        if (typeof automateLinkedInConnect === 'function') {
+          console.log("Executing automateLinkedInConnect in child tab");
+          automateLinkedInConnect(event.data.shouldSend);
+        } else {
+          console.log("automateLinkedInConnect function not found in child tab");
+        }
+      }
+    });
+    
+    // Tell parent we're ready
+    window.opener.postMessage({ action: 'tabReady' }, '*');
+    console.log("Child tab sent ready message");
+  `;
+  
+  // Wait for tab to load
+  setTimeout(() => {
+    try {
+      // Try to inject our listener script 
+      profileTab.postMessage({ action: 'autoConnect', shouldSend: true }, '*');
+      console.log('%c SENT CONNECT MESSAGE TO NEW TAB', 'background: #3498db; color: #ffffff; font-size: 12px; font-weight: bold;');
+      
+      // Also try to execute directly if we can
+      try {
+        profileTab.eval(`
+          console.log("Direct execution in new tab");
+          setTimeout(() => {
+            if (typeof automateLinkedInConnect === 'function') {
+              automateLinkedInConnect(true);
+            } else {
+              console.log("Function not available via eval");
+            }
+          }, 2000);
+        `);
+      } catch (evalErr) {
+        console.log('Eval execution failed:', evalErr);
+      }
+      
+      // Move to the next profile after a longer delay to ensure completion
+      setTimeout(() => {
+        profileTab.close();
+        processNextProfile(index + 1);
+      }, 8000); // Increased to 8 seconds
+    } catch (err) {
+      console.log('%c ERROR COMMUNICATING WITH TAB:', 'background: #e74c3c; color: #ffffff; font-size: 12px;', err);
+      
+      // Still try to proceed to next profile
+      setTimeout(() => {
+        try { profileTab.close(); } catch (e) { /* ignore */ }
+        processNextProfile(index + 1);
+      }, 1000);
+    }
+  }, 3000); // Increased delay to 3 seconds to ensure page is loaded
+}
+
+// Connect to all selected profiles
+function connectToAllSelected() {
+  if (selectedProfiles.length === 0) {
+    console.log('%c NO PROFILES SELECTED TO CONNECT TO', 'background: #e74c3c; color: #ffffff; font-size: 14px; font-weight: bold;');
+    alert('Please select at least one profile to connect to.');
+    return;
+  }
+  
+  console.log(`%c STARTING TO CONNECT TO ${selectedProfiles.length} SELECTED PROFILES`, 'background: #2ecc71; color: #ffffff; font-size: 14px; font-weight: bold;');
+  
+  // Process the first profile
+  processNextProfile(0);
+}
+
+// Function to automate LinkedIn connection
+function automateLinkedInConnect(shouldSend = true) {
+  console.log('%c AUTOMATION STARTED', 'background: #f39c12; color: #ffffff; font-size: 14px; font-weight: bold;');
+  
+  // Find profile name first
+  const name = findProfileName();
+  if (!name) {
+    console.log('%c NO PROFILE NAME FOUND', 'background: #FFC107; color: #000000; font-size: 16px; font-weight: bold;');
+    return;
+  }
+  
+  console.log('%c PROFILE NAME: ' + name, 'background: #4CAF50; color: #ffffff; font-size: 16px; font-weight: bold;');
+  
+  // Step 1: Find and click the Connect button in main profile
+  findAndClickConnect(shouldSend);
+}
+
+// Check if on company people page and initialize UI
+function initializeCompanyPeoplePageFeatures() {
+  if (isCompanyPeoplePage()) {
+    console.log('Detected company people page, initializing features');
+    createFloatingPanel();
+    addSelectButtonsToProfiles();
+  }
+}
+
+// Call initialization on page load
+window.addEventListener('load', function() {
+  initializeCompanyPeoplePageFeatures();
+});
+
+// Also check when page content changes
+const observer = new MutationObserver(function(mutations) {
+  // Check if any profiles were added
+  const shouldAddButtons = mutations.some(mutation => {
+    return Array.from(mutation.addedNodes).some(node => {
+      if (node.nodeType === 1) { // Element node
+        return node.querySelector('.org-people-profile-card__profile-card-spacing') ||
+               node.classList.contains('org-people-profile-card__profile-card-spacing');
+      }
+      return false;
+    });
+  });
+  
+  if (shouldAddButtons) {
+    addSelectButtonsToProfiles();
+  }
+});
+
+// Start observing the document
+observer.observe(document.body, { childList: true, subtree: true });
 
 // Function to find profile name using multiple methods
 function findProfileName() {
@@ -276,21 +682,6 @@ function findConnectInDropdown() {
     });
   
   return null;
-}
-
-// Function to automate LinkedIn connection
-function automateLinkedInConnect(shouldSend = true) {
-  // Find profile name first
-  const name = findProfileName();
-  if (!name) {
-    console.log('%c NO PROFILE NAME FOUND', 'background: #FFC107; color: #000000; font-size: 16px; font-weight: bold;');
-    return;
-  }
-  
-  console.log('%c PROFILE NAME: ' + name, 'background: #4CAF50; color: #ffffff; font-size: 16px; font-weight: bold;');
-  
-  // Step 1: Find and click the Connect button in main profile
-  findAndClickConnect(shouldSend);
 }
 
 // Function to handle the Add Note flow
