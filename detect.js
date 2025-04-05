@@ -4,6 +4,9 @@ let altKeyPressed = false;
 // Store selected profiles
 let selectedProfiles = [];
 
+// Add a status property to track connection progress
+// Possible status values: 'pending', 'processing', 'completed', 'failed'
+
 // Listen for keydown events
 document.addEventListener('keydown', function(event) {
   // Update Alt key state
@@ -89,8 +92,8 @@ function addSelectButtonsToProfiles() {
         selectButton.classList.remove('artdeco-button--primary');
         selectButton.classList.add('artdeco-button--tertiary');
       } else {
-        // Select
-        selectedProfiles.push({ name, url: profileUrl });
+        // Select with initial pending status
+        selectedProfiles.push({ name, url: profileUrl, status: 'pending' });
         selectButton.innerHTML = `<span class="artdeco-button__text">Selected ✓</span>`;
         selectButton.classList.remove('artdeco-button--tertiary');
         selectButton.classList.add('artdeco-button--primary');
@@ -251,6 +254,50 @@ function updateFloatingPanel() {
     nameLink.style.textDecoration = 'none';
     nameLink.style.fontWeight = 'bold';
     
+    // Create status indicator
+    const statusContainer = document.createElement('div');
+    statusContainer.style.display = 'flex';
+    statusContainer.style.alignItems = 'center';
+    
+    if (profile.status) {
+      const statusBadge = document.createElement('span');
+      statusBadge.style.padding = '2px 6px';
+      statusBadge.style.borderRadius = '10px';
+      statusBadge.style.fontSize = '11px';
+      statusBadge.style.marginRight = '8px';
+      
+      // Set badge style based on status
+      switch(profile.status) {
+        case 'pending':
+          statusBadge.textContent = 'Pending';
+          statusBadge.style.backgroundColor = '#f0f0f0';
+          statusBadge.style.color = '#666';
+          break;
+        case 'processing':
+          statusBadge.textContent = 'Processing';
+          statusBadge.style.backgroundColor = '#fff8e1';
+          statusBadge.style.color = '#ff9800';
+          break;
+        case 'completed':
+          statusBadge.textContent = 'Completed';
+          statusBadge.style.backgroundColor = '#e8f5e9';
+          statusBadge.style.color = '#4caf50';
+          break;
+        case 'failed':
+          statusBadge.textContent = 'Failed';
+          statusBadge.style.backgroundColor = '#ffebee';
+          statusBadge.style.color = '#f44336';
+          break;
+        case 'timeout':
+          statusBadge.textContent = 'Timeout';
+          statusBadge.style.backgroundColor = '#ffebee';
+          statusBadge.style.color = '#f44336';
+          break;
+      }
+      
+      statusContainer.appendChild(statusBadge);
+    }
+    
     // Remove button
     const removeButton = document.createElement('button');
     removeButton.innerHTML = '✕';
@@ -278,8 +325,9 @@ function updateFloatingPanel() {
       }
     };
     
+    statusContainer.appendChild(removeButton);
     profileItem.appendChild(nameLink);
-    profileItem.appendChild(removeButton);
+    profileItem.appendChild(statusContainer);
     content.appendChild(profileItem);
   });
 }
@@ -297,6 +345,26 @@ window.addEventListener('message', function(event) {
   }
 });
 
+// Connect to all selected profiles
+function connectToAllSelected() {
+  if (selectedProfiles.length === 0) {
+    console.log('%c NO PROFILES SELECTED TO CONNECT TO', 'background: #e74c3c; color: #ffffff; font-size: 14px; font-weight: bold;');
+    alert('Please select at least one profile to connect to.');
+    return;
+  }
+  
+  console.log(`%c STARTING TO CONNECT TO ${selectedProfiles.length} SELECTED PROFILES`, 'background: #2ecc71; color: #ffffff; font-size: 14px; font-weight: bold;');
+  
+  // Set all profiles to pending status
+  selectedProfiles.forEach(profile => {
+    profile.status = 'pending';
+  });
+  updateFloatingPanel();
+  
+  // Process the first profile
+  processNextProfile(0);
+}
+
 // Process profiles sequentially
 function processNextProfile(index) {
   if (index >= selectedProfiles.length) {
@@ -307,16 +375,34 @@ function processNextProfile(index) {
   const profile = selectedProfiles[index];
   console.log(`%c PROCESSING PROFILE ${index + 1}/${selectedProfiles.length}: ${profile.name}`, 'background: #3498db; color: #ffffff; font-size: 12px; font-weight: bold;');
   
+  // Update status to processing
+  profile.status = 'processing';
+  updateFloatingPanel();
+  
   // Open the profile in a new tab
   const profileTab = window.open(profile.url, '_blank');
   
   if (!profileTab) {
     console.log('%c FAILED TO OPEN NEW TAB - POPUP BLOCKER?', 'background: #e74c3c; color: #ffffff; font-size: 14px; font-weight: bold;');
     alert('Failed to open profile in new tab. Please check your popup blocker settings.');
+    profile.status = 'failed';
+    updateFloatingPanel();
+    // Try next profile
+    setTimeout(() => processNextProfile(index + 1), 1000);
     return;
   }
   
   console.log('%c NEW TAB OPENED, WAITING FOR PAGE LOAD', 'background: #3498db; color: #ffffff; font-size: 12px; font-weight: bold;');
+  
+  // Set a timeout to handle cases where the tab process hangs
+  const timeoutId = setTimeout(() => {
+    console.log('%c CONNECTION TIMEOUT FOR: ' + profile.name, 'background: #e74c3c; color: #ffffff; font-size: 14px; font-weight: bold;');
+    profile.status = 'timeout';
+    updateFloatingPanel();
+    
+    try { profileTab.close(); } catch (e) { /* ignore */ }
+    processNextProfile(index + 1);
+  }, 25000); // 25 second timeout
   
   // Create a content script to inject into the new tab
   const script = `
@@ -339,11 +425,29 @@ function processNextProfile(index) {
     console.log("Child tab sent ready message");
   `;
   
+  // Listen for connection complete message
+  window.addEventListener('message', function connectionListener(event) {
+    if (event.data && event.data.action === 'connectionComplete' && event.data.profileUrl === profile.url) {
+      console.log('%c RECEIVED CONNECTION COMPLETE MESSAGE FOR: ' + profile.name, 'background: #4CAF50; color: #ffffff; font-size: 14px; font-weight: bold;');
+      
+      clearTimeout(timeoutId);
+      profile.status = 'completed';
+      updateFloatingPanel();
+      
+      // Remove this listener
+      window.removeEventListener('message', connectionListener);
+    }
+  });
+  
   // Wait for tab to load
   setTimeout(() => {
     try {
       // Try to inject our listener script 
-      profileTab.postMessage({ action: 'autoConnect', shouldSend: true }, '*');
+      profileTab.postMessage({ 
+        action: 'autoConnect', 
+        shouldSend: true,
+        profileUrl: profile.url 
+      }, '*');
       console.log('%c SENT CONNECT MESSAGE TO NEW TAB', 'background: #3498db; color: #ffffff; font-size: 12px; font-weight: bold;');
       
       // Also try to execute directly if we can
@@ -353,6 +457,14 @@ function processNextProfile(index) {
           setTimeout(() => {
             if (typeof automateLinkedInConnect === 'function') {
               automateLinkedInConnect(true);
+              
+              // Notify parent window when complete
+              setTimeout(() => {
+                window.opener.postMessage({ 
+                  action: 'connectionComplete',
+                  profileUrl: '${profile.url}'
+                }, '*');
+              }, 2000);
             } else {
               console.log("Function not available via eval");
             }
@@ -364,11 +476,24 @@ function processNextProfile(index) {
       
       // Move to the next profile after a longer delay to ensure completion
       setTimeout(() => {
-        profileTab.close();
+        clearTimeout(timeoutId);
+        
+        // If status is still processing, mark as completed
+        if (profile.status === 'processing') {
+          profile.status = 'completed';
+          updateFloatingPanel();
+        }
+        
+        try { profileTab.close(); } catch (e) { /* ignore */ }
         processNextProfile(index + 1);
-      }, 8000); // Increased to 8 seconds
+      }, 10000); // Increased to 10 seconds
     } catch (err) {
       console.log('%c ERROR COMMUNICATING WITH TAB:', 'background: #e74c3c; color: #ffffff; font-size: 12px;', err);
+      clearTimeout(timeoutId);
+      
+      // Mark as failed
+      profile.status = 'failed';
+      updateFloatingPanel();
       
       // Still try to proceed to next profile
       setTimeout(() => {
@@ -376,21 +501,7 @@ function processNextProfile(index) {
         processNextProfile(index + 1);
       }, 1000);
     }
-  }, 3000); // Increased delay to 3 seconds to ensure page is loaded
-}
-
-// Connect to all selected profiles
-function connectToAllSelected() {
-  if (selectedProfiles.length === 0) {
-    console.log('%c NO PROFILES SELECTED TO CONNECT TO', 'background: #e74c3c; color: #ffffff; font-size: 14px; font-weight: bold;');
-    alert('Please select at least one profile to connect to.');
-    return;
-  }
-  
-  console.log(`%c STARTING TO CONNECT TO ${selectedProfiles.length} SELECTED PROFILES`, 'background: #2ecc71; color: #ffffff; font-size: 14px; font-weight: bold;');
-  
-  // Process the first profile
-  processNextProfile(0);
+  }, 3000); // 3 second delay to ensure page is loaded
 }
 
 // Function to automate LinkedIn connection
@@ -715,7 +826,7 @@ function handleAddNote(shouldSend = true) {
   }, 500);
 }
 
-// Function to fill the custom message
+// Function to fill the custom message - update to notify parent window
 function fillCustomMessage(shouldSend = true) {
   // Different selectors for the textarea
   const textareaSelectors = [
@@ -733,6 +844,13 @@ function fillCustomMessage(shouldSend = true) {
   
   if (!textarea) {
     console.log('%c TEXTAREA NOT FOUND', 'background: #FFC107; color: #000000; font-size: 16px; font-weight: bold;');
+    // Try to notify the parent window
+    try {
+      window.opener && window.opener.postMessage({ 
+        action: 'connectionFailed',
+        profileUrl: window.location.href
+      }, '*');
+    } catch (e) { /* ignore */ }
     return;
   }
   
@@ -780,6 +898,14 @@ I'm Sunny, currently a Data Engineer at American Airlines. Impressed by your bac
         sendButton.click();
         console.log('%c CONNECTION REQUEST SENT!', 'background: #4CAF50; color: #ffffff; font-size: 16px; font-weight: bold;');
         
+        // Notify the parent window that connection is complete
+        try {
+          window.opener && window.opener.postMessage({ 
+            action: 'connectionComplete',
+            profileUrl: window.location.href
+          }, '*');
+        } catch (e) { /* ignore */ }
+        
         // Wait a brief moment to ensure the send action is completed, then close the tab
         setTimeout(() => {
           console.log('Closing tab...');
@@ -787,6 +913,14 @@ I'm Sunny, currently a Data Engineer at American Airlines. Impressed by your bac
         }, 1000); // Wait 1 second before closing
       } else {
         console.log('%c SEND BUTTON NOT FOUND', 'background: #FFC107; color: #000000; font-size: 16px; font-weight: bold;');
+        
+        // Notify the parent window that connection failed
+        try {
+          window.opener && window.opener.postMessage({ 
+            action: 'connectionFailed',
+            profileUrl: window.location.href
+          }, '*');
+        } catch (e) { /* ignore */ }
       }
     }, 500);
   } else {
