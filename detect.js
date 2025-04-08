@@ -56,23 +56,24 @@ function addSelectButtonsToProfiles() {
   
   console.log('Adding select buttons to profiles on company people page');
   
-  // Find all profile cards
-  const profileCards = document.querySelectorAll('.org-people-profile-card__profile-card-spacing');
+  // Update selector to be more specific and match the actual HTML structure
+  const profileCards = document.querySelectorAll('li.org-people-profile-card__profile-card-spacing');
   
   profileCards.forEach((card, index) => {
     // Check if we already added a select button to this card
     if (card.querySelector('.profile-select-button')) return;
     
-    // Find the profile link and name
-    const profileLink = card.querySelector('a.onRHPXypfWLuNOCinrLJfqDJJJaXLBUXSKz');
+    // Update selector to match the actual link structure
+    const profileLink = card.querySelector('a[data-test-app-aware-link]');
     if (!profileLink) return;
     
     const profileUrl = profileLink.href;
+    // Update selector to match the actual name element
     const nameElement = card.querySelector('.artdeco-entity-lockup__title');
     const name = nameElement ? nameElement.textContent.trim() : `Profile ${index}`;
     
-    // Find the footer to place our button beside the Connect button
-    const footer = card.querySelector('footer');
+    // Find the footer where the Connect button is
+    const footer = card.querySelector('footer.ph3.pb3');
     if (!footer) return;
     
     // Create a Select button
@@ -117,7 +118,7 @@ function createFloatingPanel() {
   panel.id = 'selected-profiles-panel';
   panel.style.position = 'fixed';
   panel.style.bottom = '20px';
-  panel.style.right = '20px';
+  panel.style.left = '20px';
   panel.style.width = '300px';
   panel.style.maxHeight = '400px';
   panel.style.backgroundColor = 'white';
@@ -310,9 +311,9 @@ function updateFloatingPanel() {
       updateFloatingPanel();
       
       // Find and update the corresponding select button
-      const profileCards = document.querySelectorAll('.org-people-profile-card__profile-card-spacing');
+      const profileCards = document.querySelectorAll('li.org-people-profile-card__profile-card-spacing');
       for (const card of profileCards) {
-        const link = card.querySelector('a.onRHPXypfWLuNOCinrLJfqDJJJaXLBUXSKz');
+        const link = card.querySelector('a[data-test-app-aware-link]');
         if (link && link.href === profile.url) {
           const selectButton = card.querySelector('.profile-select-button');
           if (selectButton) {
@@ -541,7 +542,7 @@ const observer = new MutationObserver(function(mutations) {
   const shouldAddButtons = mutations.some(mutation => {
     return Array.from(mutation.addedNodes).some(node => {
       if (node.nodeType === 1) { // Element node
-        return node.querySelector('.org-people-profile-card__profile-card-spacing') ||
+        return node.querySelector('li.org-people-profile-card__profile-card-spacing') ||
                node.classList.contains('org-people-profile-card__profile-card-spacing');
       }
       return false;
