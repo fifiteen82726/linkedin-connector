@@ -1,5 +1,6 @@
 // Track modifier key states
 let altKeyPressed = false;
+let optionKeyPressed = false;
 
 // Store selected profiles
 let selectedProfiles = [];
@@ -7,8 +8,94 @@ let selectedProfiles = [];
 // Add a status property to track connection progress
 // Possible status values: 'pending', 'processing', 'completed', 'failed'
 
+// Add this at the top of the file with other state variables
+let showFloatingPanel = true; // Set this to true to enable floating panel
+
+// Default settings and initialization
+const DEFAULT_SETTINGS = {
+  myName: 'Sunny',
+  myRole: 'Data Analyst Engineer',
+  myCompany: 'American Airlines',
+  targetRole: 'Data',
+  messageTemplate: `Hi {{firstName}},
+
+Hope you are doing well!
+I'm {{myName}}, currently a {{myRole}} at {{myCompany}}. Impressed by your background, I'd like to connect and seek your referral for {{targetRole}} opportunities. Please let me share my resume once we connect on LinkedIn. Thanks!`,
+  hasInitializedSettings: false
+};
+
+// Initialize settings
+const userSettings = { ...DEFAULT_SETTINGS };
+
+// Load settings from chrome.storage
+chrome.storage.sync.get(DEFAULT_SETTINGS, function(items) {
+  Object.assign(userSettings, items);
+});
+
 // Listen for keydown events
 document.addEventListener('keydown', function(event) {
+  // Log all key events for debugging
+  console.log('Key Event:', {
+    key: event.key,
+    code: event.code,
+    altKey: event.altKey,
+    metaKey: event.metaKey,
+    ctrlKey: event.ctrlKey,
+    location: event.location,
+    keyCode: event.keyCode,
+    which: event.which
+  });
+
+  // Update modifier key states
+  if (event.key === 'Alt' || event.key === 'Meta' || event.altKey || event.metaKey) {
+    altKeyPressed = true;
+    console.log('Modifier key pressed:', event.key);
+  }
+
+  // Check for hotkey combinations
+  // We'll check both direct key state and event properties
+  const isModifierPressed = altKeyPressed || event.altKey || event.metaKey;
+  
+  if (isModifierPressed) {
+    let handled = true;
+
+    switch (event.code) {
+      case 'KeyW':
+        console.log('%c HOTKEY "Option+W" DETECTED! (Fill and Send)', 'background: #ff0000; color: #ffffff; font-size: 16px; font-weight: bold;');
+        automateLinkedInConnect(true);
+        break;
+      case 'KeyQ':
+        console.log('%c HOTKEY "Option+Q" DETECTED! (Fill Only)', 'background: #ff0000; color: #ffffff; font-size: 16px; font-weight: bold;');
+        automateLinkedInConnect(false);
+        break;
+      case 'KeyS':
+        console.log('%c HOTKEY "Option+S" DETECTED! (Open Settings)', 'background: #ff0000; color: #ffffff; font-size: 16px; font-weight: bold;');
+        showSettingsDialog();
+        break;
+      case 'KeyO':
+        showFloatingPanel = !showFloatingPanel; // Toggle the floating panel
+        console.log(`%c HOTKEY "Alt+O" DETECTED! (Floating Panel ${showFloatingPanel ? 'Enabled' : 'Disabled'})`, 'background: #ff0000; color: #ffffff; font-size: 16px; font-weight: bold;');
+        
+        if (showFloatingPanel) {
+          createFloatingPanel();
+          updateFloatingPanel();
+        } else {
+          const panel = document.getElementById('selected-profiles-panel');
+          if (panel) {
+            panel.remove();
+          }
+        }
+        break;
+      default:
+        handled = false;
+    }
+
+    if (handled) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  }
+
   // Update Alt key state
   if (event.key === 'Alt') {
     altKeyPressed = true;
@@ -23,6 +110,22 @@ document.addEventListener('keydown', function(event) {
     } else if (event.code === 'KeyQ') {
       console.log('%c HOTKEY "Alt+Q" DETECTED! (Fill Only)', 'background: #ff0000; color: #ffffff; font-size: 16px; font-weight: bold;');
       automateLinkedInConnect(false); // false means fill only
+    } else if (event.code === 'KeyS') {
+      console.log('%c HOTKEY "Alt+S" DETECTED! (Open Settings)', 'background: #ff0000; color: #ffffff; font-size: 16px; font-weight: bold;');
+      showSettingsDialog();
+    } else if (event.code === 'KeyO') {
+      showFloatingPanel = !showFloatingPanel; // Toggle the floating panel
+      console.log(`%c HOTKEY "Alt+O" DETECTED! (Floating Panel ${showFloatingPanel ? 'Enabled' : 'Disabled'})`, 'background: #ff0000; color: #ffffff; font-size: 16px; font-weight: bold;');
+      
+      if (showFloatingPanel) {
+        createFloatingPanel();
+        updateFloatingPanel();
+      } else {
+        const panel = document.getElementById('selected-profiles-panel');
+        if (panel) {
+          panel.remove();
+        }
+      }
     }
   }
   
@@ -31,11 +134,11 @@ document.addEventListener('keydown', function(event) {
   console.log(`[${timestamp}] Key: "${event.key}" (code: ${event.code}) | Alt: ${altKeyPressed}`);
 });
 
-// Listen for keyup events to track when Alt is released
+// Listen for keyup events
 document.addEventListener('keyup', function(event) {
-  if (event.key === 'Alt') {
+  if (event.key === 'Alt' || event.key === 'Meta' || !event.altKey) {
     altKeyPressed = false;
-    console.log('Alt key released');
+    console.log('Modifier key released:', event.key);
   }
 });
 
@@ -100,7 +203,9 @@ function addSelectButtonsToProfiles() {
         selectButton.classList.add('artdeco-button--primary');
       }
       
-      updateFloatingPanel();
+      if (showFloatingPanel) {
+        updateFloatingPanel();
+      }
     });
     
     // Add the button to the footer
@@ -110,6 +215,8 @@ function addSelectButtonsToProfiles() {
 
 // Function to create and update the floating panel
 function createFloatingPanel() {
+  if (!showFloatingPanel) return; // Early return if floating panel is disabled
+  
   // Check if panel already exists
   if (document.getElementById('selected-profiles-panel')) return;
   
@@ -221,6 +328,8 @@ function createFloatingPanel() {
 
 // Update the floating panel with selected profiles
 function updateFloatingPanel() {
+  if (!showFloatingPanel) return; // Early return if floating panel is disabled
+  
   const panel = document.getElementById('selected-profiles-panel');
   if (!panel) return;
   
@@ -360,7 +469,10 @@ function connectToAllSelected() {
   selectedProfiles.forEach(profile => {
     profile.status = 'pending';
   });
-  updateFloatingPanel();
+  
+  if (showFloatingPanel) {
+    updateFloatingPanel();
+  }
   
   // Process the first profile
   processNextProfile(0);
@@ -526,7 +638,9 @@ function automateLinkedInConnect(shouldSend = true) {
 function initializeCompanyPeoplePageFeatures() {
   if (isCompanyPeoplePage()) {
     console.log('Detected company people page, initializing features');
-    createFloatingPanel();
+    if (showFloatingPanel) {
+      createFloatingPanel();
+    }
     addSelectButtonsToProfiles();
   }
 }
@@ -855,18 +969,33 @@ function fillCustomMessage(shouldSend = true) {
     return;
   }
   
-  // Use the first name for personalization
+  // Check if settings need to be initialized
+  if (!userSettings.hasInitializedSettings) {
+    showSettingsDialog();
+    return;
+  }
+  
+  // Use settings from chrome.storage
   const name = findProfileName();
   const firstName = getFirstName(name);
   
-  // Custom message template
-  const customMessage = `Hi ${firstName},
+  // Use saved message template or default if somehow missing
+  let message = userSettings.messageTemplate || DEFAULT_SETTINGS.messageTemplate;
+  
+  // Replace all placeholders
+  const replacements = {
+    '{{firstName}}': firstName,
+    '{{myName}}': userSettings.myName || DEFAULT_SETTINGS.myName,
+    '{{myRole}}': userSettings.myRole || DEFAULT_SETTINGS.myRole,
+    '{{myCompany}}': userSettings.myCompany || DEFAULT_SETTINGS.myCompany,
+    '{{targetRole}}': userSettings.targetRole || DEFAULT_SETTINGS.targetRole
+  };
 
-Hope you are doing well!
-I'm Sunny, currently a Data Engineer at American Airlines. Impressed by your background, I'd like to connect and seek your referral for data job opportunities. Please let me share my resume once we connect on LinkedIn. Thanks!`;
+  // Replace all placeholders in one go
+  message = message.replace(/{{[^}]+}}/g, match => replacements[match] || match);
   
   // Fill in the textarea
-  textarea.value = customMessage;
+  textarea.value = message;
   
   // Trigger input event to ensure LinkedIn recognizes the change
   const inputEvent = new Event('input', { bubbles: true });
@@ -969,4 +1098,188 @@ function getFirstName(fullName) {
 }
 
 // Log when the script is loaded
-console.log('LinkedIn Connect Automation extension activated - press Alt+W to connect and send, Alt+Q to fill only');
+console.log('LinkedIn Connect Automation extension activated - press Alt/Option+W to connect and send, Alt/Option+Q to fill only');
+
+// Function to show settings dialog
+function showSettingsDialog() {
+  // Load current settings
+  const currentSettings = {
+    myName: userSettings.myName || DEFAULT_SETTINGS.myName,
+    myRole: userSettings.myRole || DEFAULT_SETTINGS.myRole,
+    myCompany: userSettings.myCompany || DEFAULT_SETTINGS.myCompany,
+    targetRole: userSettings.targetRole || DEFAULT_SETTINGS.targetRole,
+    messageTemplate: userSettings.messageTemplate || DEFAULT_SETTINGS.messageTemplate
+  };
+
+  // Create the modal container
+  const modal = document.createElement('div');
+  modal.style.cssText = `
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 10000;
+  `;
+
+  // Create the modal content
+  const content = document.createElement('div');
+  content.style.cssText = `
+    background: white;
+    padding: 20px;
+    border-radius: 8px;
+    width: 600px;
+    max-width: 90%;
+    max-height: 90vh;
+    overflow-y: auto;
+  `;
+
+  // Create the header
+  const header = document.createElement('div');
+  header.style.cssText = `
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+  `;
+  header.innerHTML = `
+    <h2 style="margin: 0; color: #0a66c2;">LinkedIn Automation Settings</h2>
+    <button class="close-button" style="
+      border: none;
+      background: none;
+      font-size: 20px;
+      cursor: pointer;
+      padding: 5px;
+    ">×</button>
+  `;
+
+  // Create the form with current values
+  const form = document.createElement('div');
+  form.innerHTML = `
+    <div style="margin-bottom: 20px;">
+      <h3 style="margin-bottom: 10px;">Your Information</h3>
+      <div style="margin-bottom: 10px;">
+        <label style="display: block; margin-bottom: 5px;">Your Name:</label>
+        <input type="text" id="myName" value="${currentSettings.myName}" style="
+          width: 100%;
+          padding: 8px;
+          border: 1px solid #ccc;
+          border-radius: 4px;
+        ">
+      </div>
+      <div style="margin-bottom: 10px;">
+        <label style="display: block; margin-bottom: 5px;">Your Role:</label>
+        <input type="text" id="myRole" value="${currentSettings.myRole}" style="
+          width: 100%;
+          padding: 8px;
+          border: 1px solid #ccc;
+          border-radius: 4px;
+        ">
+      </div>
+      <div style="margin-bottom: 10px;">
+        <label style="display: block; margin-bottom: 5px;">Your Company:</label>
+        <input type="text" id="myCompany" value="${currentSettings.myCompany}" style="
+          width: 100%;
+          padding: 8px;
+          border: 1px solid #ccc;
+          border-radius: 4px;
+        ">
+      </div>
+      <div style="margin-bottom: 20px;">
+        <label style="display: block; margin-bottom: 5px;">Target Role:</label>
+        <input type="text" id="targetRole" value="${currentSettings.targetRole}" style="
+          width: 100%;
+          padding: 8px;
+          border: 1px solid #ccc;
+          border-radius: 4px;
+        ">
+      </div>
+    </div>
+    <div style="margin-bottom: 20px;">
+      <h3 style="margin-bottom: 10px;">Message Template</h3>
+      <p style="margin-bottom: 10px; color: #666;">
+        Available placeholders:
+        <code>{{firstName}}</code> - Connection's first name
+        <code>{{myName}}</code> - Your name
+        <code>{{myRole}}</code> - Your role
+        <code>{{myCompany}}</code> - Your company
+        <code>{{targetRole}}</code> - Target role
+      </p>
+      <textarea id="messageTemplate" style="
+        width: 100%;
+        height: 200px;
+        padding: 8px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        font-family: monospace;
+        resize: vertical;
+      ">${currentSettings.messageTemplate}</textarea>
+    </div>
+    <div style="margin-bottom: 20px;">
+      <h3 style="margin-bottom: 10px;">Preview</h3>
+      <div id="messagePreview" style="
+        padding: 10px;
+        border: 1px solid #eee;
+        border-radius: 4px;
+        background: #f9f9f9;
+        white-space: pre-wrap;
+      "></div>
+    </div>
+    <div style="text-align: right;">
+      <button id="saveSettings" class="artdeco-button artdeco-button--2 artdeco-button--primary">Save Settings</button>
+    </div>
+  `;
+
+  // Append everything to the modal
+  content.appendChild(header);
+  content.appendChild(form);
+  modal.appendChild(content);
+  document.body.appendChild(modal);
+
+  // Add event listeners
+  const closeButton = modal.querySelector('.close-button');
+  closeButton.onclick = () => modal.remove();
+
+  const saveButton = modal.querySelector('#saveSettings');
+  saveButton.onclick = () => {
+    const newSettings = {
+      messageTemplate: modal.querySelector('#messageTemplate').value,
+      myName: modal.querySelector('#myName').value,
+      myRole: modal.querySelector('#myRole').value,
+      myCompany: modal.querySelector('#myCompany').value,
+      targetRole: modal.querySelector('#targetRole').value,
+      hasInitializedSettings: true
+    };
+    
+    // Update userSettings instead of reassigning
+    Object.assign(userSettings, newSettings);
+    
+    // Save to chrome.storage
+    chrome.storage.sync.set(newSettings);
+    
+    modal.remove();
+  };
+
+  // Add live preview
+  const messageTemplate = modal.querySelector('#messageTemplate');
+  const messagePreview = modal.querySelector('#messagePreview');
+  const updatePreview = () => {
+    let preview = messageTemplate.value;
+    preview = preview.replace('{{firstName}}', 'John');
+    preview = preview.replace('{{myName}}', modal.querySelector('#myName').value);
+    preview = preview.replace('{{myRole}}', modal.querySelector('#myRole').value);
+    preview = preview.replace('{{myCompany}}', modal.querySelector('#myCompany').value);
+    preview = preview.replace('{{targetRole}}', modal.querySelector('#targetRole').value);
+    messagePreview.textContent = preview;
+  };
+  
+  messageTemplate.oninput = updatePreview;
+  modal.querySelectorAll('input').forEach(input => {
+    input.oninput = updatePreview;
+  });
+  updatePreview();
+}
