@@ -183,6 +183,7 @@ document.addEventListener('keydown', function(event) {
           !event.altKey
           || event.ctrlKey
           || event.metaKey
+          || event.shiftKey
           || (
             typeof event.getModifierState === 'function'
             && event.getModifierState('AltGraph')

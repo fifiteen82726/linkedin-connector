@@ -1084,6 +1084,7 @@ async function assertReplyTemplateShortcutIgnored({
   ctrlKey = false,
   getModifierState = () => false,
   metaKey = false,
+  shiftKey = false,
 }) {
   const listeners = {};
   const document = makeDocument({ listeners });
@@ -1108,6 +1109,7 @@ async function assertReplyTemplateShortcutIgnored({
     keyCode: 69,
     location: 0,
     metaKey,
+    shiftKey,
     preventDefault() {
       prevented += 1;
     },
@@ -1149,6 +1151,13 @@ test('AltGraph+E does not open reply templates or handle the event', async () =>
     getModifierState(modifier) {
       return modifier === 'AltGraph';
     },
+  });
+});
+
+test('Shift+Option+E does not open reply templates or handle the event', async () => {
+  await assertReplyTemplateShortcutIgnored({
+    altKey: true,
+    shiftKey: true,
   });
 });
 
