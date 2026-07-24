@@ -179,7 +179,15 @@ document.addEventListener('keydown', function(event) {
         showSettingsDialog();
         break;
       case 'KeyE':
-        if (!event.altKey) {
+        if (
+          !event.altKey
+          || event.ctrlKey
+          || event.metaKey
+          || (
+            typeof event.getModifierState === 'function'
+            && event.getModifierState('AltGraph')
+          )
+        ) {
           handled = false;
           break;
         }

@@ -1079,7 +1079,12 @@ test('Option+E opens reply templates once and handles the event in the top frame
   assert.equal(stopped, 1);
 });
 
-test('Command+E does not open reply templates or handle the event', async () => {
+async function assertReplyTemplateShortcutIgnored({
+  altKey = false,
+  ctrlKey = false,
+  getModifierState = () => false,
+  metaKey = false,
+}) {
   const listeners = {};
   const document = makeDocument({ listeners });
   let calls = 0;
@@ -1095,13 +1100,14 @@ test('Command+E does not open reply templates or handle the event', async () => 
   });
 
   listeners.keydown({
-    altKey: false,
+    altKey,
     code: 'KeyE',
-    ctrlKey: false,
+    ctrlKey,
+    getModifierState,
     key: 'e',
     keyCode: 69,
     location: 0,
-    metaKey: true,
+    metaKey,
     preventDefault() {
       prevented += 1;
     },
@@ -1115,6 +1121,35 @@ test('Command+E does not open reply templates or handle the event', async () => 
   assert.equal(calls, 0);
   assert.equal(prevented, 0);
   assert.equal(stopped, 0);
+}
+
+test('Command+E does not open reply templates or handle the event', async () => {
+  await assertReplyTemplateShortcutIgnored({
+    metaKey: true,
+  });
+});
+
+test('Ctrl+Alt+E does not open reply templates or handle the event', async () => {
+  await assertReplyTemplateShortcutIgnored({
+    altKey: true,
+    ctrlKey: true,
+  });
+});
+
+test('Command+Option+E does not open reply templates or handle the event', async () => {
+  await assertReplyTemplateShortcutIgnored({
+    altKey: true,
+    metaKey: true,
+  });
+});
+
+test('AltGraph+E does not open reply templates or handle the event', async () => {
+  await assertReplyTemplateShortcutIgnored({
+    altKey: true,
+    getModifierState(modifier) {
+      return modifier === 'AltGraph';
+    },
+  });
 });
 
 test('Option+E does not open reply templates inside a child frame', () => {
