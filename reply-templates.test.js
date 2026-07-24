@@ -865,6 +865,38 @@ test('editing a template after Save clears the stale Saved status', async () => 
   assert.equal(status.className, 'reply-template-status');
 });
 
+test('editing while Save is pending does not mark the newer body as Saved', async () => {
+  const doc = new FakeDocument();
+  const save = deferred();
+  const savedBodies = [];
+  const store = {
+    async getTemplates() {
+      return [sampleTemplate()];
+    },
+    saveBody(id, body) {
+      savedBodies.push([id, body]);
+      return save.promise;
+    },
+  };
+  const { api } = loadReplyTemplates({ doc, store });
+  const backdrop = api.showDialog({ doc, store });
+  await settle();
+  const textarea = backdrop.querySelector('textarea');
+  const saveButton = findByText(backdrop, 'button', 'Save');
+  const status = backdrop.querySelector('[role="status"]');
+
+  textarea.value = 'Body A';
+  const saveClick = saveButton.emit('click');
+  textarea.value = 'Body B';
+  await textarea.emit('input');
+  save.resolve();
+  await saveClick;
+
+  assert.deepEqual(savedBodies, [['referral-follow-up', 'Body A']]);
+  assert.equal(status.textContent, '');
+  assert.equal(status.className, 'reply-template-status');
+});
+
 test('Save and Copy buttons ignore duplicate clicks while pending and recover', async () => {
   const doc = new FakeDocument();
   const save = deferred();

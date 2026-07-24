@@ -390,10 +390,13 @@
 
         textarea.addEventListener('input', clearSavedStatus);
         runOnce(copyButton, () => actions.copy(textarea.value));
-        runOnce(
-          saveButton,
-          () => actions.save(template.id, textarea.value),
-        );
+        runOnce(saveButton, async () => {
+          const body = textarea.value;
+          const saved = await actions.save(template.id, body);
+          if (saved && textarea.value !== body) {
+            clearSavedStatus();
+          }
+        });
         itemActions.append(copyButton, saveButton);
         item.append(itemTitle, textarea, itemActions);
         nextRenderedTemplates.set(template.id, {
