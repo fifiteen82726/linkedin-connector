@@ -14,12 +14,20 @@ let showFloatingPanel = true; // Set this to true to enable floating panel
 const INVITE_MESSAGE_SOURCE = 'linkedin-invite-extension';
 const ADD_NOTE_INITIAL_RETRIES = 60;
 const BATCH_PROFILE_TIMEOUT_MS = 60000;
+const AUTO_SELECT_TARGET = 10;
+const AUTO_SELECT_MAX_LOADS = 2;
+const AUTO_SELECT_LOAD_TIMEOUT_MS = 5000;
+const AUTO_SELECT_CONTROL_TIMEOUT_MS = 2000;
 let activeAddNoteRequest = null;
 let activeBatchAutomationRequestId = null;
 let activeBatchAutomationSourceTabId = null;
 let activeBatchProfileRequest = null;
+let activeInviteModalCommandId = null;
+let lastHandledInviteModalCommandId = null;
 let nextAddNoteRequestId = 1;
 let nextBatchRequestId = 1;
+let nextInviteModalCommandId = 1;
+let autoSelectRunning = false;
 
 function notifyBatchController(status, reason = '') {
   if (!activeBatchAutomationRequestId) {
@@ -296,6 +304,255 @@ function isCurrentProfileInviteHref(href) {
   return vanityMatch ? decodeURIComponent(vanityMatch[1]) === currentSlug : true;
 }
 
+function getProfileCards() {
+  return Array.from(document.querySelectorAll(
+    'li.org-people-profile-card__profile-card-spacing'
+  ));
+}
+
+function hasConnectAction(card) {
+  return Array.from(card.querySelectorAll('button, a, [role="button"]'))
+    .some((control) => {
+      if (!isElementVisible(control) || !isControlEnabled(control)) {
+        return false;
+      }
+      const text = (control.textContent || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+      return text === 'connect';
+    });
+}
+
+function extractProfileCandidate(card) {
+  const link = card.querySelector(
+    'a[data-test-app-aware-link][href*="/in/"], a[href*="/in/"]'
+  );
+  const nameElement = card.querySelector('.artdeco-entity-lockup__title');
+  const titleElement = card.querySelector(
+    '.artdeco-entity-lockup__subtitle, .org-people-profile-card__profile-title'
+  );
+  const url = link && (link.href || link.getAttribute('href'));
+  const name = nameElement && nameElement.textContent.trim();
+  if (!url || !name) return null;
+
+  return {
+    name,
+    title: titleElement ? titleElement.textContent.trim() : '',
+    url,
+    card,
+    canConnect: hasConnectAction(card)
+  };
+}
+
+function getProfileUrlSet() {
+  return new Set(
+    getProfileCards()
+      .map(extractProfileCandidate)
+      .filter(Boolean)
+      .map((candidate) => candidate.url)
+  );
+}
+
+function getProfileSnapshot() {
+  return {
+    count: getProfileCards().length,
+    urls: getProfileUrlSet()
+  };
+}
+
+function isElementVisible(element) {
+  if (!element ||
+      element.hidden ||
+      element.getAttribute('aria-hidden') === 'true') {
+    return false;
+  }
+  if (typeof element.getClientRects === 'function') {
+    return element.getClientRects().length > 0;
+  }
+  return true;
+}
+
+function isShowMoreResultsControl(element) {
+  if (!isElementVisible(element)) return false;
+  const text = (element.textContent || '').replace(/\s+/g, ' ').trim();
+  const label = (element.getAttribute('aria-label') || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text === 'Show more results' || label === 'Show more results';
+}
+
+function isControlEnabled(element) {
+  return !element.disabled &&
+    element.getAttribute('aria-disabled') !== 'true';
+}
+
+function findShowMoreResultsButton() {
+  return Array.from(document.querySelectorAll('button, [role="button"]'))
+    .find((element) => (
+      isShowMoreResultsControl(element) && isControlEnabled(element)
+    )) || null;
+}
+
+function waitForShowMoreResultsButtonReady(
+  timeoutMs = AUTO_SELECT_CONTROL_TIMEOUT_MS
+) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timeoutId = null;
+    const finish = (button) => {
+      if (settled) return;
+      settled = true;
+      observer.disconnect();
+      clearTimeout(timeoutId);
+      resolve(button);
+    };
+    const check = () => {
+      const button = findShowMoreResultsButton();
+      if (button) finish(button);
+    };
+    const observer = new MutationObserver(check);
+
+    observer.observe(document.body, {
+      attributes: true,
+      childList: true,
+      subtree: true,
+      attributeFilter: ['aria-disabled', 'class', 'disabled', 'hidden']
+    });
+    timeoutId = setTimeout(() => finish(null), timeoutMs);
+    check();
+  });
+}
+
+function waitForAdditionalProfileCards(
+  previousSnapshot,
+  timeoutMs = AUTO_SELECT_LOAD_TIMEOUT_MS
+) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timeoutId = null;
+    const hasAdditionalProfile = () => {
+      if (getProfileCards().length > previousSnapshot.count) {
+        return true;
+      }
+      for (const url of getProfileUrlSet()) {
+        if (!previousSnapshot.urls.has(url)) return true;
+      }
+      return false;
+    };
+    const finish = (didLoad) => {
+      if (settled) return;
+      settled = true;
+      observer.disconnect();
+      clearTimeout(timeoutId);
+      resolve(didLoad);
+    };
+    const observer = new MutationObserver(() => {
+      if (hasAdditionalProfile()) finish(true);
+    });
+
+    observer.observe(document.body, { childList: true, subtree: true });
+    timeoutId = setTimeout(() => finish(hasAdditionalProfile()), timeoutMs);
+    if (hasAdditionalProfile()) finish(true);
+  });
+}
+
+async function loadAdditionalPeople() {
+  let attempts = 0;
+  while (attempts < AUTO_SELECT_MAX_LOADS) {
+    const button = await waitForShowMoreResultsButtonReady();
+    if (!button) break;
+    updateAutoSelectStatus(
+      `Loading people ${attempts + 1}/${AUTO_SELECT_MAX_LOADS}…`
+    );
+    const previousSnapshot = getProfileSnapshot();
+    button.click();
+    attempts += 1;
+    const didLoad = await waitForAdditionalProfileCards(previousSnapshot);
+    if (!didLoad) break;
+  }
+  return attempts;
+}
+
+function setProfileSelectButtonState(button, isSelected) {
+  if (!button) return;
+  button.innerHTML = isSelected
+    ? '<span class="artdeco-button__text">Selected ✓</span>'
+    : '<span class="artdeco-button__text">Select</span>';
+  button.classList.toggle('artdeco-button--primary', isSelected);
+  button.classList.toggle('artdeco-button--tertiary', !isSelected);
+}
+
+function syncProfileSelectButton(candidate, isSelected = true) {
+  const button = candidate.card &&
+    candidate.card.querySelector('.profile-select-button');
+  setProfileSelectButtonState(button, isSelected);
+}
+
+function updateAutoSelectStatus(message) {
+  const status = document.getElementById('auto-select-status');
+  if (status) status.textContent = message;
+}
+
+function setAutoSelectButtonRunning(isRunning) {
+  const button = document.getElementById('auto-select-profiles');
+  if (!button) return;
+  button.disabled = isRunning;
+  button.setAttribute('aria-busy', String(isRunning));
+}
+
+async function autoSelectProfiles() {
+  if (autoSelectRunning) return false;
+  if (selectedProfiles.length >= AUTO_SELECT_TARGET) {
+    updateAutoSelectStatus(
+      `Selected ${AUTO_SELECT_TARGET}/${AUTO_SELECT_TARGET} profiles`
+    );
+    return true;
+  }
+
+  autoSelectRunning = true;
+  setAutoSelectButtonRunning(true);
+  try {
+    await loadAdditionalPeople();
+    const candidates = getProfileCards()
+      .map(extractProfileCandidate)
+      .filter((candidate) => candidate && candidate.canConnect);
+    updateAutoSelectStatus(`Reviewing ${candidates.length} profiles…`);
+    const selectedUrls = new Set(
+      selectedProfiles.map((profile) => profile.url)
+    );
+    const ranked = CandidateRules.rankCandidates(candidates, selectedUrls);
+    const slots = Math.max(
+      0,
+      AUTO_SELECT_TARGET - selectedProfiles.length
+    );
+
+    for (const candidate of ranked.slice(0, slots)) {
+      selectedProfiles.push({
+        name: candidate.name,
+        url: candidate.url,
+        status: 'pending'
+      });
+      syncProfileSelectButton(candidate, true);
+    }
+
+    updateFloatingPanel();
+    const message = selectedProfiles.length >= AUTO_SELECT_TARGET
+      ? `Selected ${AUTO_SELECT_TARGET}/${AUTO_SELECT_TARGET} profiles`
+      : `Only found ${selectedProfiles.length}/${AUTO_SELECT_TARGET} matching profiles`;
+    updateAutoSelectStatus(message);
+    return true;
+  } catch (error) {
+    updateAutoSelectStatus(
+      `Auto-select failed: ${error.message || String(error)}`
+    );
+    return false;
+  } finally {
+    autoSelectRunning = false;
+    setAutoSelectButtonRunning(false);
+  }
+}
+
 // Function to create "Select" buttons on profile cards
 function addSelectButtonsToProfiles() {
   if (!isCompanyPeoplePage()) return;
@@ -303,20 +560,16 @@ function addSelectButtonsToProfiles() {
   console.log('Adding select buttons to profiles on company people page');
   
   // Update selector to be more specific and match the actual HTML structure
-  const profileCards = document.querySelectorAll('li.org-people-profile-card__profile-card-spacing');
+  const profileCards = getProfileCards();
   
-  profileCards.forEach((card, index) => {
+  profileCards.forEach((card) => {
     // Check if we already added a select button to this card
     if (card.querySelector('.profile-select-button')) return;
     
-    // Update selector to match the actual link structure
-    const profileLink = card.querySelector('a[data-test-app-aware-link]');
-    if (!profileLink) return;
-    
-    const profileUrl = profileLink.href;
-    // Update selector to match the actual name element
-    const nameElement = card.querySelector('.artdeco-entity-lockup__title');
-    const name = nameElement ? nameElement.textContent.trim() : `Profile ${index}`;
+    const candidate = extractProfileCandidate(card);
+    if (!candidate) return;
+    const profileUrl = candidate.url;
+    const name = candidate.name;
     
     // Find the footer where the Connect button is
     const footer = card.querySelector('footer.ph3.pb3');
@@ -326,7 +579,10 @@ function addSelectButtonsToProfiles() {
     const selectButton = document.createElement('button');
     selectButton.className = 'artdeco-button artdeco-button--2 artdeco-button--tertiary profile-select-button';
     selectButton.style.marginTop = '8px';
-    selectButton.innerHTML = `<span class="artdeco-button__text">Select</span>`;
+    setProfileSelectButtonState(
+      selectButton,
+      selectedProfiles.some((profile) => profile.url === profileUrl)
+    );
     
     // Add click handler
     selectButton.addEventListener('click', function() {
@@ -335,15 +591,11 @@ function addSelectButtonsToProfiles() {
       if (isSelected) {
         // Deselect
         selectedProfiles = selectedProfiles.filter(profile => profile.url !== profileUrl);
-        selectButton.innerHTML = `<span class="artdeco-button__text">Select</span>`;
-        selectButton.classList.remove('artdeco-button--primary');
-        selectButton.classList.add('artdeco-button--tertiary');
+        setProfileSelectButtonState(selectButton, false);
       } else {
         // Select with initial pending status
         selectedProfiles.push({ name, url: profileUrl, status: 'pending' });
-        selectButton.innerHTML = `<span class="artdeco-button__text">Selected ✓</span>`;
-        selectButton.classList.remove('artdeco-button--tertiary');
-        selectButton.classList.add('artdeco-button--primary');
+        setProfileSelectButtonState(selectButton, true);
       }
       
       if (showFloatingPanel) {
@@ -422,6 +674,14 @@ function createFloatingPanel() {
   content.style.padding = '12px';
   content.style.maxHeight = '300px';
   content.style.overflowY = 'auto';
+
+  const autoSelectStatus = document.createElement('div');
+  autoSelectStatus.id = 'auto-select-status';
+  autoSelectStatus.textContent = 'Ready to auto-select';
+  autoSelectStatus.style.padding = '8px 12px';
+  autoSelectStatus.style.fontSize = '12px';
+  autoSelectStatus.style.color = '#666';
+  autoSelectStatus.style.borderTop = '1px solid #e0e0e0';
   
   // Create footer
   const footer = document.createElement('div');
@@ -430,6 +690,14 @@ function createFloatingPanel() {
   footer.style.borderTop = '1px solid #e0e0e0';
   footer.style.display = 'flex';
   footer.style.justifyContent = 'space-between';
+  footer.style.flexWrap = 'wrap';
+  footer.style.gap = '8px';
+
+  const autoSelectButton = document.createElement('button');
+  autoSelectButton.id = 'auto-select-profiles';
+  autoSelectButton.className = 'artdeco-button artdeco-button--2 artdeco-button--secondary';
+  autoSelectButton.innerHTML = '<span class="artdeco-button__text">Auto-select 10</span>';
+  autoSelectButton.onclick = autoSelectProfiles;
   
   // Create Connect All button
   const connectAllButton = document.createElement('button');
@@ -450,19 +718,19 @@ function createFloatingPanel() {
     // Update all select buttons to deselected state
     const selectButtons = document.querySelectorAll('.profile-select-button');
     selectButtons.forEach(button => {
-      button.innerHTML = `<span class="artdeco-button__text">Select</span>`;
-      button.classList.remove('artdeco-button--primary');
-      button.classList.add('artdeco-button--tertiary');
+      setProfileSelectButtonState(button, false);
     });
   };
   
   // Add buttons to footer
+  footer.appendChild(autoSelectButton);
   footer.appendChild(clearAllButton);
   footer.appendChild(connectAllButton);
   
   // Assemble the panel
   panel.appendChild(header);
   panel.appendChild(content);
+  panel.appendChild(autoSelectStatus);
   panel.appendChild(footer);
   
   // Add to the page
@@ -563,16 +831,10 @@ function updateFloatingPanel() {
       updateFloatingPanel();
       
       // Find and update the corresponding select button
-      const profileCards = document.querySelectorAll('li.org-people-profile-card__profile-card-spacing');
-      for (const card of profileCards) {
-        const link = card.querySelector('a[data-test-app-aware-link]');
-        if (link && link.href === profile.url) {
-          const selectButton = card.querySelector('.profile-select-button');
-          if (selectButton) {
-            selectButton.innerHTML = `<span class="artdeco-button__text">Select</span>`;
-            selectButton.classList.remove('artdeco-button--primary');
-            selectButton.classList.add('artdeco-button--tertiary');
-          }
+      for (const card of getProfileCards()) {
+        const candidate = extractProfileCandidate(card);
+        if (candidate && candidate.url === profile.url) {
+          syncProfileSelectButton(candidate, false);
           break;
         }
       }
@@ -590,7 +852,10 @@ function broadcastInviteModalCommand(shouldSend, profileName) {
     source: INVITE_MESSAGE_SOURCE,
     action: 'handleInviteModal',
     shouldSend,
-    profileName
+    profileName,
+    commandId: activeInviteModalCommandId,
+    requestId: activeBatchAutomationRequestId,
+    sourceTabId: activeBatchAutomationSourceTabId
   };
   let recipients = 0;
   const frames = Array.from(document.querySelectorAll('iframe'));
@@ -610,12 +875,15 @@ function broadcastInviteModalCommand(shouldSend, profileName) {
       const frameUrl = new URL(frameSource, window.location.href);
       const isLinkedInFrame = frameUrl.hostname === 'linkedin.com' ||
         frameUrl.hostname.endsWith('.linkedin.com');
+      const isInviteFrame = isLinkedInFrame &&
+        /^\/preload(?:\/|$)/.test(frameUrl.pathname);
 
       logDiagnostic('FRAME_DISCOVERY', {
         frameIndex,
         source: frameSource,
         origin: frameUrl.origin,
         isLinkedInFrame,
+        isInviteFrame,
         hasContentWindow,
         contentDocumentAccessible
       });
@@ -625,6 +893,15 @@ function broadcastInviteModalCommand(shouldSend, profileName) {
           frameIndex,
           source: frameSource,
           reason: 'not-linkedin-frame'
+        });
+        continue;
+      }
+
+      if (!isInviteFrame) {
+        logDiagnostic('FRAME_MESSAGE_SKIPPED', {
+          frameIndex,
+          source: frameSource,
+          reason: 'not-invite-frame'
         });
         continue;
       }
@@ -681,6 +958,15 @@ window.addEventListener('message', function(event) {
   if (window !== window.top &&
       event.source === window.parent &&
       isInviteModalMessage) {
+    const commandId = event.data.commandId || event.data.requestId || null;
+    if (commandId && commandId === lastHandledInviteModalCommandId) {
+      return;
+    }
+    lastHandledInviteModalCommandId = commandId;
+    activeBatchAutomationRequestId = event.data.requestId || null;
+    activeBatchAutomationSourceTabId = Number.isInteger(event.data.sourceTabId)
+      ? event.data.sourceTabId
+      : null;
     console.log('%c HANDLING INVITE MODAL IN CHILD FRAME', 'background: #8e44ad; color: #ffffff; font-size: 12px; font-weight: bold;');
     handleAddNote(
       event.data.shouldSend,
@@ -1045,6 +1331,8 @@ function findConnectButton() {
 }
 
 function startInviteModalFlow(shouldSend, profileName) {
+  activeInviteModalCommandId = `invite-${nextInviteModalCommandId}`;
+  nextInviteModalCommandId += 1;
   handleAddNote(shouldSend, ADD_NOTE_INITIAL_RETRIES, profileName);
 }
 
@@ -1195,7 +1483,8 @@ function handleAddNote(
     activeAddNoteRequest = {
       id: requestId,
       shouldSend,
-      profileName
+      profileName,
+      delegatedToInviteFrame: false
     };
     logDiagnostic('ADD_NOTE_REQUEST_STARTED', {
       requestId,
@@ -1210,9 +1499,10 @@ function handleAddNote(
   logAddNoteScan(retriesRemaining);
   const addNoteButton = findAddNoteButton();
   if (!addNoteButton) {
-    if (window === window.top && retriesRemaining === ADD_NOTE_INITIAL_RETRIES) {
+    if (window === window.top) {
       const delegatedFrames = broadcastInviteModalCommand(shouldSend, profileName);
       if (delegatedFrames > 0) {
+        activeAddNoteRequest.delegatedToInviteFrame = true;
         console.log('Invite modal handling also delegated to child frame');
       }
     }
@@ -1232,7 +1522,15 @@ function handleAddNote(
       return;
     }
 
+    const delegatedToInviteFrame =
+      window === window.top &&
+      activeAddNoteRequest.delegatedToInviteFrame;
     activeAddNoteRequest = null;
+    if (delegatedToInviteFrame) {
+      logDiagnostic('ADD_NOTE_DELEGATED_TIMEOUT', { requestId });
+      return;
+    }
+
     console.log('%c ADD NOTE BUTTON NOT FOUND', 'background: #FFC107; color: #000000; font-size: 16px; font-weight: bold;');
     notifyBatchController('failed', 'add-note-button-not-found');
     return;

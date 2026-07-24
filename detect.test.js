@@ -8,13 +8,23 @@ test('manifest configures LinkedIn content scripts and the batch background work
 
   assert.equal(manifest.content_scripts[0].all_frames, true);
   assert.deepEqual(manifest.content_scripts[0].matches, ['https://*.linkedin.com/*']);
-  assert.deepEqual(manifest.permissions, ['storage', 'tabs', 'clipboardWrite']);
-  assert.deepEqual(manifest.content_scripts[0].js, [
-    'reply-template-store.js',
-    'reply-templates.js',
-    'detect.js',
-  ]);
-  assert.deepEqual(manifest.content_scripts[0].css, ['reply-templates.css']);
+  assert.deepEqual(
+    manifest.content_scripts[0].js,
+    [
+      'candidate-rules.js',
+      'reply-template-store.js',
+      'reply-templates.js',
+      'detect.js',
+    ],
+  );
+  assert.deepEqual(
+    manifest.content_scripts[0].css,
+    ['reply-templates.css'],
+  );
+  assert.deepEqual(
+    manifest.permissions,
+    ['storage', 'tabs', 'clipboardWrite'],
+  );
   assert.equal(manifest.background.service_worker, 'background.js');
 });
 
@@ -31,7 +41,20 @@ test('basic template defaults to the Sr. Data Engineer role everywhere', () => {
   );
 });
 
+test('floating panel defines the Auto-select 10 review control', () => {
+  const detectSource = fs.readFileSync('detect.js', 'utf8');
+
+  assert.match(detectSource, /id = 'auto-select-profiles'/);
+  assert.match(detectSource, />Auto-select 10</);
+  assert.match(detectSource, /id = 'auto-select-status'/);
+});
+
 function makeElement({
+  attributes = {},
+  classNames = [],
+  disabled = false,
+  hidden = false,
+  visible = true,
   textContent = '',
   href = '',
   src = '',
@@ -39,21 +62,50 @@ function makeElement({
   contentDocument = null,
   contentWindow = null,
   shadowRoot = null,
+  nodeType = 1,
   querySelectorMap = {},
   querySelectorAllMap = {},
 } = {}) {
+  const classes = new Set(classNames);
+  const listeners = {};
   return {
     textContent,
     href,
     src,
+    disabled,
+    hidden,
     contentDocument,
     contentWindow,
     shadowRoot,
+    nodeType,
+    style: {},
     clicked: false,
     classList: {
-      contains() {
-        return false;
+      add(className) {
+        classes.add(className);
       },
+      contains(className) {
+        return classes.has(className);
+      },
+      remove(className) {
+        classes.delete(className);
+      },
+      toggle(className, force) {
+        if (force === undefined) {
+          if (classes.has(className)) {
+            classes.delete(className);
+            return false;
+          }
+          classes.add(className);
+          return true;
+        }
+        if (force) classes.add(className);
+        else classes.delete(className);
+        return force;
+      },
+    },
+    addEventListener(type, handler) {
+      listeners[type] = handler;
     },
     closest() {
       return null;
@@ -66,7 +118,13 @@ function makeElement({
       if (name === 'aria-label') return ariaLabel;
       if (name === 'href') return href;
       if (name === 'src') return src;
-      return null;
+      return attributes[name] ?? null;
+    },
+    getClientRects() {
+      return visible && !hidden ? [{}] : [];
+    },
+    setAttribute(name, value) {
+      attributes[name] = String(value);
     },
     querySelector(selector) {
       return querySelectorMap[selector] || null;
@@ -198,7 +256,12 @@ function loadDetect(
     MutationObserver: class {
       constructor(callback) {
         this.callback = callback;
+        this.disconnected = false;
         mutationObservers.push(this);
+      }
+
+      disconnect() {
+        this.disconnected = true;
       }
 
       observe() {}
@@ -210,11 +273,337 @@ function loadDetect(
   };
 
   vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync('candidate-rules.js', 'utf8'), sandbox, {
+    filename: 'candidate-rules.js',
+  });
   vm.runInContext(fs.readFileSync('detect.js', 'utf8'), sandbox, {
     filename: 'detect.js',
   });
   return sandbox;
 }
+
+function makeProfileCard({ action = 'Connect', name, title, url }) {
+  const link = makeElement({ href: url });
+  const nameElement = makeElement({ textContent: name });
+  const titleElement = makeElement({ textContent: title });
+  const actionControl = makeElement({ textContent: action });
+  return makeElement({
+    querySelectorMap: {
+      'a[data-test-app-aware-link][href*="/in/"], a[href*="/in/"]': link,
+      '.artdeco-entity-lockup__title': nameElement,
+      '.artdeco-entity-lockup__subtitle, .org-people-profile-card__profile-title':
+        titleElement,
+    },
+    querySelectorAllMap: {
+      'button, a, [role="button"]': [actionControl],
+    },
+  });
+}
+
+test('extractProfileCandidate reads name, title, and profile URL', () => {
+  const card = makeProfileCard({
+    name: 'Amy Chen',
+    title: 'Data Engineer',
+    url: 'https://www.linkedin.com/in/amy-chen/',
+  });
+  const sandbox = loadDetect(makeDocument());
+
+  const candidate = sandbox.extractProfileCandidate(card);
+
+  assert.equal(candidate.name, 'Amy Chen');
+  assert.equal(candidate.title, 'Data Engineer');
+  assert.equal(candidate.url, 'https://www.linkedin.com/in/amy-chen/');
+  assert.equal(candidate.card, card);
+  assert.equal(candidate.canConnect, true);
+});
+
+test('extractProfileCandidate only marks cards with a Connect action as connectable', () => {
+  const sandbox = loadDetect(makeDocument());
+  const actions = ['Connect', 'Pending', 'Follow', 'Message'];
+
+  const eligibility = actions.map((action) => sandbox.extractProfileCandidate(
+    makeProfileCard({
+      action,
+      name: `${action} Person`,
+      title: 'Data Engineer',
+      url: `/in/${action.toLowerCase()}`,
+    }),
+  ).canConnect);
+
+  assert.deepEqual(eligibility, [true, false, false, false]);
+});
+
+test('findShowMoreResultsButton requires exact visible text and enabled state', () => {
+  const hidden = makeElement({
+    textContent: 'Show more results',
+    visible: false,
+  });
+  const disabled = makeElement({
+    disabled: true,
+    textContent: 'Show more results',
+  });
+  const wrong = makeElement({ textContent: 'Show more jobs' });
+  const right = makeElement({ textContent: ' Show more results ' });
+  const sandbox = loadDetect(makeDocument({
+    querySelectorAllMap: {
+      'button, [role="button"]': [hidden, disabled, wrong, right],
+    },
+  }));
+
+  assert.equal(sandbox.findShowMoreResultsButton(), right);
+});
+
+test('loadAdditionalPeople clicks Show more results at most twice in sequence', async () => {
+  const first = makeElement({ textContent: 'Show more results' });
+  const second = makeElement({ textContent: 'Show more results' });
+  const buttons = [first, second];
+  const sandbox = loadDetect(makeDocument());
+  sandbox.findShowMoreResultsButton = () => buttons.shift() || null;
+  sandbox.getProfileUrlSet = () => new Set();
+  sandbox.waitForAdditionalProfileCards = async () => true;
+  sandbox.updateAutoSelectStatus = () => {};
+
+  const attempts = await sandbox.loadAdditionalPeople();
+
+  assert.equal(attempts, 2);
+  assert.equal(first.clicked, true);
+  assert.equal(second.clicked, true);
+});
+
+test('waitForAdditionalProfileCards resolves when the card count grows', async () => {
+  const cards = [
+    makeProfileCard({
+      name: 'Amy Chen',
+      title: 'Designer',
+      url: '/in/amy',
+    }),
+  ];
+  const timers = [];
+  const sandbox = loadDetect(
+    makeDocument({
+      querySelectorAllMap: {
+        'li.org-people-profile-card__profile-card-spacing': cards,
+      },
+    }),
+    undefined,
+    {
+      setTimeout(callback) {
+        timers.push(callback);
+        return timers.length;
+      },
+    },
+  );
+  const snapshot = sandbox.getProfileSnapshot();
+
+  const waiting = sandbox.waitForAdditionalProfileCards(snapshot);
+  cards.push(makeElement());
+  sandbox.__mutationObservers.at(-1).callback();
+
+  assert.equal(await waiting, true);
+});
+
+test('waitForShowMoreResultsButtonReady waits for a disabled button to recover', async () => {
+  const button = makeElement({
+    disabled: true,
+    textContent: 'Show more results',
+  });
+  const timers = [];
+  const sandbox = loadDetect(
+    makeDocument({
+      querySelectorAllMap: {
+        'button, [role="button"]': [button],
+      },
+    }),
+    undefined,
+    {
+      setTimeout(callback) {
+        timers.push(callback);
+        return timers.length;
+      },
+    },
+  );
+
+  const waiting = sandbox.waitForShowMoreResultsButtonReady();
+  button.disabled = false;
+  sandbox.__mutationObservers.at(-1).callback();
+
+  assert.equal(await waiting, button);
+});
+
+test('waitForShowMoreResultsButtonReady returns null after its bounded timeout', async () => {
+  const timers = [];
+  const sandbox = loadDetect(makeDocument(), undefined, {
+    setTimeout(callback) {
+      timers.push(callback);
+      return timers.length;
+    },
+  });
+
+  const waiting = sandbox.waitForShowMoreResultsButtonReady();
+  timers.at(-1)();
+
+  assert.equal(await waiting, null);
+});
+
+test('autoSelectProfiles preserves existing profiles and fills to ten by priority', async () => {
+  const sandbox = loadDetect(
+    makeDocument(),
+    'https://www.linkedin.com/company/acme/people/',
+  );
+  const existing = Array.from({ length: 8 }, (_, index) => ({
+    name: `Existing ${index}`,
+    url: `/in/existing-${index}`,
+    status: 'pending',
+  }));
+  const candidates = [
+    {
+      name: 'Jamie Robertson',
+      title: 'Software Engineer',
+      url: '/in/engineer',
+      canConnect: true,
+    },
+    {
+      name: 'Amy Chen',
+      title: 'Designer',
+      url: '/in/chen',
+      canConnect: true,
+    },
+    {
+      name: 'Chris Kim',
+      title: 'Director of Data',
+      url: '/in/director',
+      canConnect: true,
+    },
+  ];
+  vm.runInContext(`selectedProfiles = ${JSON.stringify(existing)}`, sandbox);
+  sandbox.loadAdditionalPeople = async () => 2;
+  sandbox.getProfileCards = () => candidates;
+  sandbox.extractProfileCandidate = (candidate) => candidate;
+  sandbox.updateFloatingPanel = () => {};
+  sandbox.updateAutoSelectStatus = (message) => {
+    sandbox.__status = message;
+  };
+  sandbox.setAutoSelectButtonRunning = () => {};
+  sandbox.syncProfileSelectButton = () => {};
+
+  await sandbox.autoSelectProfiles();
+
+  const selected = vm.runInContext('selectedProfiles', sandbox);
+  assert.equal(selected.length, 10);
+  assert.equal(selected[8].url, '/in/chen');
+  assert.equal(selected[9].url, '/in/engineer');
+  assert.equal(sandbox.__status, 'Selected 10/10 profiles');
+});
+
+test('autoSelectProfiles excludes qualified profiles without a Connect action', async () => {
+  const sandbox = loadDetect(
+    makeDocument(),
+    'https://www.linkedin.com/company/acme/people/',
+  );
+  const candidates = [
+    {
+      name: 'Amy Chen',
+      title: 'Designer',
+      url: '/in/pending',
+      canConnect: false,
+    },
+    {
+      name: 'Jamie Robertson',
+      title: 'Software Engineer',
+      url: '/in/connect',
+      canConnect: true,
+    },
+  ];
+  sandbox.loadAdditionalPeople = async () => 0;
+  sandbox.getProfileCards = () => candidates;
+  sandbox.extractProfileCandidate = (candidate) => candidate;
+  sandbox.updateFloatingPanel = () => {};
+  sandbox.updateAutoSelectStatus = () => {};
+  sandbox.setAutoSelectButtonRunning = () => {};
+  sandbox.syncProfileSelectButton = () => {};
+
+  await sandbox.autoSelectProfiles();
+
+  const selected = vm.runInContext('selectedProfiles', sandbox);
+  assert.equal(selected.length, 1);
+  assert.equal(selected[0].url, '/in/connect');
+});
+
+test('autoSelectProfiles reports fewer than ten and does not run concurrently', async () => {
+  const sandbox = loadDetect(
+    makeDocument(),
+    'https://www.linkedin.com/company/acme/people/',
+  );
+  let releaseLoading;
+  sandbox.loadAdditionalPeople = () => new Promise((resolve) => {
+    releaseLoading = resolve;
+  });
+  sandbox.getProfileCards = () => [];
+  sandbox.updateFloatingPanel = () => {};
+  sandbox.updateAutoSelectStatus = (message) => {
+    sandbox.__status = message;
+  };
+  sandbox.setAutoSelectButtonRunning = () => {};
+
+  const first = sandbox.autoSelectProfiles();
+  const secondResult = await sandbox.autoSelectProfiles();
+
+  assert.equal(secondResult, false);
+  releaseLoading(0);
+  await first;
+  assert.equal(sandbox.__status, 'Only found 0/10 matching profiles');
+});
+
+test('autoSelectProfiles skips loading and reports target completion when overfilled', async () => {
+  const sandbox = loadDetect(
+    makeDocument(),
+    'https://www.linkedin.com/company/acme/people/',
+  );
+  const existing = Array.from({ length: 12 }, (_, index) => ({
+    name: `Existing ${index}`,
+    url: `/in/existing-${index}`,
+    status: 'pending',
+  }));
+  let loadCalls = 0;
+  vm.runInContext(`selectedProfiles = ${JSON.stringify(existing)}`, sandbox);
+  sandbox.loadAdditionalPeople = async () => {
+    loadCalls += 1;
+  };
+  sandbox.updateAutoSelectStatus = (message) => {
+    sandbox.__status = message;
+  };
+
+  assert.equal(await sandbox.autoSelectProfiles(), true);
+  assert.equal(loadCalls, 0);
+  assert.equal(sandbox.__status, 'Selected 10/10 profiles');
+  assert.equal(vm.runInContext('selectedProfiles.length', sandbox), 12);
+});
+
+test('autoSelectProfiles restores its button and preserves selections after an error', async () => {
+  const sandbox = loadDetect(
+    makeDocument(),
+    'https://www.linkedin.com/company/acme/people/',
+  );
+  vm.runInContext(
+    "selectedProfiles = [{ name: 'Amy Chen', url: '/in/amy', status: 'pending' }]",
+    sandbox,
+  );
+  const runningStates = [];
+  sandbox.loadAdditionalPeople = async () => {
+    throw new Error('LinkedIn changed');
+  };
+  sandbox.setAutoSelectButtonRunning = (isRunning) => {
+    runningStates.push(isRunning);
+  };
+  sandbox.updateAutoSelectStatus = (message) => {
+    sandbox.__status = message;
+  };
+
+  assert.equal(await sandbox.autoSelectProfiles(), false);
+  assert.deepEqual(runningStates, [true, false]);
+  assert.equal(sandbox.__status, 'Auto-select failed: LinkedIn changed');
+  assert.equal(vm.runInContext('selectedProfiles.length', sandbox), 1);
+});
 
 test('Connect to All asks the background worker to automate the selected profile', () => {
   const profileUrl = 'https://www.linkedin.com/in/yoojin-lim/';
@@ -818,6 +1207,67 @@ test('a child frame handles an invite-modal command from its parent', () => {
   assert.equal(receivedEvent.action, 'handleInviteModal');
 });
 
+test('a child invite frame reports the batch result with the parent request context', () => {
+  const sandbox = loadDetect(
+    makeDocument({ title: 'LinkedIn' }),
+    'https://www.linkedin.com/preload/custom-invite/?vanityName=yoojin-lim',
+    { isTopFrame: false },
+  );
+
+  for (const listener of sandbox.__windowListeners.message || []) {
+    listener({
+      data: {
+        source: 'linkedin-invite-extension',
+        action: 'handleInviteModal',
+        shouldSend: true,
+        profileName: 'Yoojin L.',
+        requestId: 'batch-1',
+        sourceTabId: 7,
+      },
+      source: sandbox.window.parent,
+      origin: 'https://www.linkedin.com',
+    });
+  }
+
+  assert.equal(sandbox.notifyBatchController('completed'), true);
+  assert.equal(sandbox.__runtimeMessages.length, 1);
+  assert.equal(sandbox.__runtimeMessages[0].action, 'batchProfileResult');
+  assert.equal(sandbox.__runtimeMessages[0].requestId, 'batch-1');
+  assert.equal(sandbox.__runtimeMessages[0].sourceTabId, 7);
+  assert.equal(sandbox.__runtimeMessages[0].status, 'completed');
+});
+
+test('a child invite frame ignores duplicate commands for the same batch request', () => {
+  const sandbox = loadDetect(
+    makeDocument({ title: 'LinkedIn' }),
+    'https://www.linkedin.com/preload/custom-invite/?vanityName=yoojin-lim',
+    { isTopFrame: false },
+  );
+  let calls = 0;
+  sandbox.handleAddNote = () => {
+    calls += 1;
+  };
+  const event = {
+    data: {
+      source: 'linkedin-invite-extension',
+      action: 'handleInviteModal',
+      shouldSend: true,
+      profileName: 'Yoojin L.',
+      requestId: 'batch-1',
+      sourceTabId: 7,
+    },
+    source: sandbox.window.parent,
+    origin: 'https://www.linkedin.com',
+  };
+
+  for (const listener of sandbox.__windowListeners.message || []) {
+    listener(event);
+    listener(event);
+  }
+
+  assert.equal(calls, 1);
+});
+
 test('the parent frame broadcasts invite-modal commands to child frames', () => {
   const postedMessages = [];
   const logs = [];
@@ -843,6 +1293,10 @@ test('the parent frame broadcasts invite-modal commands to child frames', () => 
     },
   });
   const sandbox = loadDetect(document, undefined, { logs });
+  vm.runInContext(
+    "activeBatchAutomationRequestId = 'batch-1'; activeBatchAutomationSourceTabId = 7",
+    sandbox,
+  );
 
   sandbox.broadcastInviteModalCommand(false, 'Yoojin L.');
 
@@ -852,6 +1306,8 @@ test('the parent frame broadcasts invite-modal commands to child frames', () => 
   assert.equal(postedMessages[0].message.action, 'handleInviteModal');
   assert.equal(postedMessages[0].message.shouldSend, false);
   assert.equal(postedMessages[0].message.profileName, 'Yoojin L.');
+  assert.equal(postedMessages[0].message.requestId, 'batch-1');
+  assert.equal(postedMessages[0].message.sourceTabId, 7);
 
   const diagnosticEvents = logs
     .map((entry) => entry[1])
@@ -877,6 +1333,55 @@ test('the parent frame broadcasts invite-modal commands to child frames', () => 
   );
   assert.equal(delegatedEvent.frameCount, 2);
   assert.equal(delegatedEvent.recipients, 1);
+});
+
+test('the parent frame ignores LinkedIn frames that are not invite frames', () => {
+  const postedMessages = [];
+  const frame = makeElement({
+    src: 'https://merchantpool1.linkedin.com/',
+    contentWindow: {
+      postMessage(message) {
+        postedMessages.push(message);
+      },
+    },
+  });
+  const document = makeDocument({
+    querySelectorAllMap: {
+      iframe: [frame],
+    },
+  });
+  const sandbox = loadDetect(document);
+
+  sandbox.broadcastInviteModalCommand(true, 'Yoojin L.');
+
+  assert.equal(postedMessages.length, 0);
+});
+
+test('the top frame does not report failure after delegating invite handling', () => {
+  const postedMessages = [];
+  const frame = makeElement({
+    src: 'https://www.linkedin.com/preload/?_bprMode=vanilla',
+    contentWindow: {
+      postMessage(message) {
+        postedMessages.push(message);
+      },
+    },
+  });
+  const document = makeDocument({
+    querySelectorAllMap: {
+      iframe: [frame],
+    },
+  });
+  const sandbox = loadDetect(document);
+  vm.runInContext(
+    "activeBatchAutomationRequestId = 'batch-1'; activeBatchAutomationSourceTabId = 7",
+    sandbox,
+  );
+
+  sandbox.handleAddNote(true, 0, 'Yoojin L.');
+
+  assert.equal(postedMessages.length, 1);
+  assert.equal(sandbox.__runtimeMessages.length, 0);
 });
 
 test('the top frame keeps polling after delegating to a child frame', () => {
@@ -918,6 +1423,41 @@ test('the top frame keeps polling after delegating to a child frame', () => {
   assert.equal(timers.length, 1);
   timers.shift()();
   assert.equal(addNoteButton.clicked, true);
+});
+
+test('the top frame delegates when the LinkedIn invite frame appears late', () => {
+  const timers = [];
+  const postedMessages = [];
+  const frames = [];
+  const frame = makeElement({
+    src: 'https://www.linkedin.com/preload/?_bprMode=vanilla',
+    contentWindow: {
+      postMessage(message) {
+        postedMessages.push(message);
+      },
+    },
+  });
+  const document = makeDocument({
+    querySelectorAllMap: {
+      iframe: frames,
+    },
+  });
+  const sandbox = loadDetect(document, undefined, {
+    setTimeout(callback) {
+      timers.push(callback);
+    },
+  });
+
+  sandbox.handleAddNote(true);
+  assert.equal(postedMessages.length, 0);
+  assert.equal(timers.length, 1);
+
+  frames.push(frame);
+  timers.shift()();
+
+  assert.equal(postedMessages.length, 1);
+  assert.equal(postedMessages[0].action, 'handleInviteModal');
+  assert.equal(postedMessages[0].shouldSend, true);
 });
 
 test('a child frame polls locally without delegating to nested LinkedIn frames', () => {

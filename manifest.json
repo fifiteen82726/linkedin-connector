@@ -24,6 +24,7 @@
     {
       "matches": ["https://*.linkedin.com/*"],
       "js": [
+        "candidate-rules.js",
         "reply-template-store.js",
         "reply-templates.js",
         "detect.js"

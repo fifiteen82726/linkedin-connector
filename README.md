@@ -12,6 +12,7 @@ A browser extension that simplifies and automates the LinkedIn connection proces
   - `Alt+Q`: Fill the message only (without sending, for review)
 - **Automatic Tab Closing**: After sending a connection request, the tab closes automatically
 - **Robust Detection**: Works with different LinkedIn layouts and UI variations
+- **Canvass Candidate Selection**: On a LinkedIn company People page, loads up to two additional result batches and fills the review list to ten candidates, prioritizing configured Asian surname romanizations and then Engineer/Data titles while excluding high-seniority roles
 
 ## How It Works
 
@@ -23,6 +24,16 @@ A browser extension that simplifies and automates the LinkedIn connection proces
    - Fills in a personalized message template with the person's first name
    - Either sends the request automatically (with `Alt+W`) or leaves it for you to review (with `Alt+Q`)
    - Closes the tab after sending (if using `Alt+W`)
+
+## Auto-Selecting Canvass Candidates
+
+1. Open a LinkedIn company `People` page.
+2. Click `Auto-select 10` in the extension's floating panel.
+3. The extension preserves profiles already selected, clicks `Show more results` at most twice, and fills the list to ten.
+4. Review the selected profiles.
+5. Click `Connect to All` only when you are ready to send invitations.
+
+The surname rule is a text heuristic based on the displayed name. It can produce false positives or miss uncommon names and does not determine a person's actual identity or ethnicity.
 
 ## Installation
 
@@ -65,7 +76,7 @@ If the extension doesn't work as expected:
 
 ## Privacy & Security
 
-- This extension only runs on LinkedIn profile pages
+- This extension only runs on LinkedIn pages
 - No data is collected or sent to external servers
 - The extension only automates UI interactions you would normally do manually
 
