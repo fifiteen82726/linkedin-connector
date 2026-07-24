@@ -308,6 +308,7 @@
     }
 
     let actions;
+    let renderGeneration = 0;
     let renderedTemplates = new Map();
 
     function render(templates, { append = false } = {}) {
@@ -398,10 +399,15 @@
       return firstTextarea;
     }
 
+    function renderAuthoritative(templates, options) {
+      renderGeneration += 1;
+      return render(templates, options);
+    }
+
     actions = createActions({
       clipboard,
       close,
-      render,
+      render: renderAuthoritative,
       setStatus,
       store,
     });
@@ -445,16 +451,23 @@
     doc.addEventListener('keydown', handleKeydown);
     doc.body.append(backdrop);
 
+    const initialLoadGeneration = renderGeneration;
     Promise.resolve()
       .then(() => store.getTemplates())
       .then((templates) => {
-        if (!closed) {
+        if (
+          !closed
+          && initialLoadGeneration === renderGeneration
+        ) {
           const firstTextarea = render(templates);
           (firstTextarea || revealAddButton).focus();
         }
       })
       .catch((error) => {
-        if (!closed) {
+        if (
+          !closed
+          && initialLoadGeneration === renderGeneration
+        ) {
           setStatus(
             errorMessage(error, 'Could not load templates'),
             'error',

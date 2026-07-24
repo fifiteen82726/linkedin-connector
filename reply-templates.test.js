@@ -1089,6 +1089,73 @@ test('a successful add preserves unsaved existing template drafts', async () => 
   );
 });
 
+test('a stale initial load cannot overwrite a newer successful add', async () => {
+  const doc = new FakeDocument();
+  const initialLoad = deferred();
+  const existingTemplate = sampleTemplate({
+    body: 'Authoritative stored body',
+  });
+  const createdTemplate = sampleTemplate({
+    id: 'custom-1',
+    title: 'New template',
+    body: 'New body',
+    kind: 'custom',
+  });
+  let addCalls = 0;
+  let getCalls = 0;
+  const store = {
+    async addCustomTemplate() {
+      addCalls += 1;
+      return createdTemplate;
+    },
+    getTemplates() {
+      getCalls += 1;
+      if (getCalls === 1) {
+        return initialLoad.promise;
+      }
+      return Promise.resolve([existingTemplate, createdTemplate]);
+    },
+  };
+  const { api } = loadReplyTemplates({ doc, store });
+  const backdrop = api.showDialog({ doc, store });
+  await settle();
+  assert.equal(getCalls, 1);
+  const revealButton = findByText(backdrop, 'button', 'Add template');
+  await revealButton.emit('click');
+  const form = backdrop.querySelector('form');
+  form.querySelector('input').value = 'New template';
+  form.querySelector('textarea').value = 'New body';
+
+  await form.emit('submit');
+
+  const templateList = backdrop.querySelector('.reply-template-list');
+  const firstTextarea = templateList.querySelector('textarea');
+  firstTextarea.value = 'Unsaved authoritative draft';
+  const status = backdrop.querySelector('[role="status"]');
+  assert.equal(addCalls, 1);
+  assert.equal(getCalls, 2);
+  assert.equal(status.textContent, 'Template added');
+  assert.equal(doc.activeElement, revealButton);
+
+  initialLoad.resolve([
+    sampleTemplate({
+      body: 'Stale initial body',
+    }),
+  ]);
+  await settle();
+
+  assert.deepEqual(
+    templateList.querySelectorAll('h3').map(({ textContent }) => textContent),
+    ['Referral follow-up', 'New template'],
+  );
+  assert.deepEqual(
+    templateList.querySelectorAll('textarea').map(({ value }) => value),
+    ['Unsaved authoritative draft', 'New body'],
+  );
+  assert.equal(status.textContent, 'Template added');
+  assert.equal(doc.activeElement, revealButton);
+});
+
 test('a persisted add with a failed refresh clears the form without duplicating', async () => {
   const doc = new FakeDocument();
   const createdTemplate = sampleTemplate({
