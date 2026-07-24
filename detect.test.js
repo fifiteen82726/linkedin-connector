@@ -24,6 +24,14 @@ test('basic template defaults to the Sr. Data Engineer role everywhere', () => {
   assert.match(optionsSource, /myRole:\s*'Sr\. Data Engineer'/);
 });
 
+test('floating panel defines the Auto-select 10 review control', () => {
+  const detectSource = fs.readFileSync('detect.js', 'utf8');
+
+  assert.match(detectSource, /id = 'auto-select-profiles'/);
+  assert.match(detectSource, />Auto-select 10</);
+  assert.match(detectSource, /id = 'auto-select-status'/);
+});
+
 function makeElement({
   attributes = {},
   classNames = [],
@@ -301,6 +309,66 @@ test('loadAdditionalPeople clicks Show more results at most twice in sequence', 
   assert.equal(attempts, 2);
   assert.equal(first.clicked, true);
   assert.equal(second.clicked, true);
+});
+
+test('autoSelectProfiles preserves existing profiles and fills to ten by priority', async () => {
+  const sandbox = loadDetect(
+    makeDocument(),
+    'https://www.linkedin.com/company/acme/people/',
+  );
+  const existing = Array.from({ length: 8 }, (_, index) => ({
+    name: `Existing ${index}`,
+    url: `/in/existing-${index}`,
+    status: 'pending',
+  }));
+  const candidates = [
+    { name: 'Jamie Robertson', title: 'Software Engineer', url: '/in/engineer' },
+    { name: 'Amy Chen', title: 'Designer', url: '/in/chen' },
+    { name: 'Chris Kim', title: 'Director of Data', url: '/in/director' },
+  ];
+  vm.runInContext(`selectedProfiles = ${JSON.stringify(existing)}`, sandbox);
+  sandbox.loadAdditionalPeople = async () => 2;
+  sandbox.getProfileCards = () => candidates;
+  sandbox.extractProfileCandidate = (candidate) => candidate;
+  sandbox.updateFloatingPanel = () => {};
+  sandbox.updateAutoSelectStatus = (message) => {
+    sandbox.__status = message;
+  };
+  sandbox.setAutoSelectButtonRunning = () => {};
+  sandbox.syncProfileSelectButton = () => {};
+
+  await sandbox.autoSelectProfiles();
+
+  const selected = vm.runInContext('selectedProfiles', sandbox);
+  assert.equal(selected.length, 10);
+  assert.equal(selected[8].url, '/in/chen');
+  assert.equal(selected[9].url, '/in/engineer');
+  assert.equal(sandbox.__status, 'Selected 10/10 profiles');
+});
+
+test('autoSelectProfiles reports fewer than ten and does not run concurrently', async () => {
+  const sandbox = loadDetect(
+    makeDocument(),
+    'https://www.linkedin.com/company/acme/people/',
+  );
+  let releaseLoading;
+  sandbox.loadAdditionalPeople = () => new Promise((resolve) => {
+    releaseLoading = resolve;
+  });
+  sandbox.getProfileCards = () => [];
+  sandbox.updateFloatingPanel = () => {};
+  sandbox.updateAutoSelectStatus = (message) => {
+    sandbox.__status = message;
+  };
+  sandbox.setAutoSelectButtonRunning = () => {};
+
+  const first = sandbox.autoSelectProfiles();
+  const secondResult = await sandbox.autoSelectProfiles();
+
+  assert.equal(secondResult, false);
+  releaseLoading(0);
+  await first;
+  assert.equal(sandbox.__status, 'Only found 0/10 matching profiles');
 });
 
 test('Connect to All asks the background worker to automate the selected profile', () => {

@@ -374,6 +374,85 @@ async function loadAdditionalPeople() {
   return attempts;
 }
 
+function setProfileSelectButtonState(button, isSelected) {
+  if (!button) return;
+  button.innerHTML = isSelected
+    ? '<span class="artdeco-button__text">Selected ✓</span>'
+    : '<span class="artdeco-button__text">Select</span>';
+  button.classList.toggle('artdeco-button--primary', isSelected);
+  button.classList.toggle('artdeco-button--tertiary', !isSelected);
+}
+
+function syncProfileSelectButton(candidate, isSelected = true) {
+  const button = candidate.card &&
+    candidate.card.querySelector('.profile-select-button');
+  setProfileSelectButtonState(button, isSelected);
+}
+
+function updateAutoSelectStatus(message) {
+  const status = document.getElementById('auto-select-status');
+  if (status) status.textContent = message;
+}
+
+function setAutoSelectButtonRunning(isRunning) {
+  const button = document.getElementById('auto-select-profiles');
+  if (!button) return;
+  button.disabled = isRunning;
+  button.setAttribute('aria-busy', String(isRunning));
+}
+
+async function autoSelectProfiles() {
+  if (autoSelectRunning) return false;
+  if (selectedProfiles.length >= AUTO_SELECT_TARGET) {
+    updateAutoSelectStatus(
+      `Selected ${selectedProfiles.length}/${AUTO_SELECT_TARGET} profiles`
+    );
+    return true;
+  }
+
+  autoSelectRunning = true;
+  setAutoSelectButtonRunning(true);
+  try {
+    await loadAdditionalPeople();
+    const candidates = getProfileCards()
+      .map(extractProfileCandidate)
+      .filter(Boolean);
+    updateAutoSelectStatus(`Reviewing ${candidates.length} profiles…`);
+    const selectedUrls = new Set(
+      selectedProfiles.map((profile) => profile.url)
+    );
+    const ranked = CandidateRules.rankCandidates(candidates, selectedUrls);
+    const slots = Math.max(
+      0,
+      AUTO_SELECT_TARGET - selectedProfiles.length
+    );
+
+    for (const candidate of ranked.slice(0, slots)) {
+      selectedProfiles.push({
+        name: candidate.name,
+        url: candidate.url,
+        status: 'pending'
+      });
+      syncProfileSelectButton(candidate, true);
+    }
+
+    updateFloatingPanel();
+    const message = selectedProfiles.length >= AUTO_SELECT_TARGET
+      ? `Selected ${AUTO_SELECT_TARGET}/${AUTO_SELECT_TARGET} profiles`
+      : `Only found ${selectedProfiles.length}/${AUTO_SELECT_TARGET} matching profiles`;
+    updateAutoSelectStatus(message);
+    return true;
+  } catch (error) {
+    updateAutoSelectStatus(
+      `Auto-select failed: ${error.message || String(error)}`
+    );
+    return false;
+  } finally {
+    autoSelectRunning = false;
+    setAutoSelectButtonRunning(false);
+  }
+}
+
 // Function to create "Select" buttons on profile cards
 function addSelectButtonsToProfiles() {
   if (!isCompanyPeoplePage()) return;
@@ -381,20 +460,16 @@ function addSelectButtonsToProfiles() {
   console.log('Adding select buttons to profiles on company people page');
   
   // Update selector to be more specific and match the actual HTML structure
-  const profileCards = document.querySelectorAll('li.org-people-profile-card__profile-card-spacing');
+  const profileCards = getProfileCards();
   
-  profileCards.forEach((card, index) => {
+  profileCards.forEach((card) => {
     // Check if we already added a select button to this card
     if (card.querySelector('.profile-select-button')) return;
     
-    // Update selector to match the actual link structure
-    const profileLink = card.querySelector('a[data-test-app-aware-link]');
-    if (!profileLink) return;
-    
-    const profileUrl = profileLink.href;
-    // Update selector to match the actual name element
-    const nameElement = card.querySelector('.artdeco-entity-lockup__title');
-    const name = nameElement ? nameElement.textContent.trim() : `Profile ${index}`;
+    const candidate = extractProfileCandidate(card);
+    if (!candidate) return;
+    const profileUrl = candidate.url;
+    const name = candidate.name;
     
     // Find the footer where the Connect button is
     const footer = card.querySelector('footer.ph3.pb3');
@@ -404,7 +479,10 @@ function addSelectButtonsToProfiles() {
     const selectButton = document.createElement('button');
     selectButton.className = 'artdeco-button artdeco-button--2 artdeco-button--tertiary profile-select-button';
     selectButton.style.marginTop = '8px';
-    selectButton.innerHTML = `<span class="artdeco-button__text">Select</span>`;
+    setProfileSelectButtonState(
+      selectButton,
+      selectedProfiles.some((profile) => profile.url === profileUrl)
+    );
     
     // Add click handler
     selectButton.addEventListener('click', function() {
@@ -413,15 +491,11 @@ function addSelectButtonsToProfiles() {
       if (isSelected) {
         // Deselect
         selectedProfiles = selectedProfiles.filter(profile => profile.url !== profileUrl);
-        selectButton.innerHTML = `<span class="artdeco-button__text">Select</span>`;
-        selectButton.classList.remove('artdeco-button--primary');
-        selectButton.classList.add('artdeco-button--tertiary');
+        setProfileSelectButtonState(selectButton, false);
       } else {
         // Select with initial pending status
         selectedProfiles.push({ name, url: profileUrl, status: 'pending' });
-        selectButton.innerHTML = `<span class="artdeco-button__text">Selected ✓</span>`;
-        selectButton.classList.remove('artdeco-button--tertiary');
-        selectButton.classList.add('artdeco-button--primary');
+        setProfileSelectButtonState(selectButton, true);
       }
       
       if (showFloatingPanel) {
@@ -500,6 +574,14 @@ function createFloatingPanel() {
   content.style.padding = '12px';
   content.style.maxHeight = '300px';
   content.style.overflowY = 'auto';
+
+  const autoSelectStatus = document.createElement('div');
+  autoSelectStatus.id = 'auto-select-status';
+  autoSelectStatus.textContent = 'Ready to auto-select';
+  autoSelectStatus.style.padding = '8px 12px';
+  autoSelectStatus.style.fontSize = '12px';
+  autoSelectStatus.style.color = '#666';
+  autoSelectStatus.style.borderTop = '1px solid #e0e0e0';
   
   // Create footer
   const footer = document.createElement('div');
@@ -508,6 +590,14 @@ function createFloatingPanel() {
   footer.style.borderTop = '1px solid #e0e0e0';
   footer.style.display = 'flex';
   footer.style.justifyContent = 'space-between';
+  footer.style.flexWrap = 'wrap';
+  footer.style.gap = '8px';
+
+  const autoSelectButton = document.createElement('button');
+  autoSelectButton.id = 'auto-select-profiles';
+  autoSelectButton.className = 'artdeco-button artdeco-button--2 artdeco-button--secondary';
+  autoSelectButton.innerHTML = '<span class="artdeco-button__text">Auto-select 10</span>';
+  autoSelectButton.onclick = autoSelectProfiles;
   
   // Create Connect All button
   const connectAllButton = document.createElement('button');
@@ -528,19 +618,19 @@ function createFloatingPanel() {
     // Update all select buttons to deselected state
     const selectButtons = document.querySelectorAll('.profile-select-button');
     selectButtons.forEach(button => {
-      button.innerHTML = `<span class="artdeco-button__text">Select</span>`;
-      button.classList.remove('artdeco-button--primary');
-      button.classList.add('artdeco-button--tertiary');
+      setProfileSelectButtonState(button, false);
     });
   };
   
   // Add buttons to footer
+  footer.appendChild(autoSelectButton);
   footer.appendChild(clearAllButton);
   footer.appendChild(connectAllButton);
   
   // Assemble the panel
   panel.appendChild(header);
   panel.appendChild(content);
+  panel.appendChild(autoSelectStatus);
   panel.appendChild(footer);
   
   // Add to the page
@@ -641,16 +731,10 @@ function updateFloatingPanel() {
       updateFloatingPanel();
       
       // Find and update the corresponding select button
-      const profileCards = document.querySelectorAll('li.org-people-profile-card__profile-card-spacing');
-      for (const card of profileCards) {
-        const link = card.querySelector('a[data-test-app-aware-link]');
-        if (link && link.href === profile.url) {
-          const selectButton = card.querySelector('.profile-select-button');
-          if (selectButton) {
-            selectButton.innerHTML = `<span class="artdeco-button__text">Select</span>`;
-            selectButton.classList.remove('artdeco-button--primary');
-            selectButton.classList.add('artdeco-button--tertiary');
-          }
+      for (const card of getProfileCards()) {
+        const candidate = extractProfileCandidate(card);
+        if (candidate && candidate.url === profile.url) {
+          syncProfileSelectButton(candidate, false);
           break;
         }
       }
