@@ -26,10 +26,12 @@ function loadStore({
   initialState,
   getError = null,
   lockManager,
+  randomUUIDs = ['uuid-1'],
   setError = null,
 } = {}) {
   let activeTransactions = 0;
   let maxActiveTransactions = 0;
+  let randomUUIDIndex = 0;
   const rawSetCalls = [];
   const storageValues = {};
   const setCalls = [];
@@ -98,7 +100,12 @@ function loadStore({
     chrome,
     crypto: {
       randomUUID() {
-        return '00000000-0000-4000-8000-000000000000';
+        const uuid = randomUUIDs[randomUUIDIndex];
+        randomUUIDIndex += 1;
+        if (uuid === undefined) {
+          throw new Error('No deterministic UUID configured');
+        }
+        return uuid;
       },
     },
     Promise,
@@ -168,6 +175,134 @@ test('getTemplates exposes the built-in referral follow-up template', async () =
   }]);
 });
 
+test('addCustomTemplate returns and persists a custom template after built-ins', async () => {
+  const { api, setCalls, storageValues } = loadStore();
+  const store = api.createStore();
+
+  assert.deepEqual(Object.keys(store), [
+    'addCustomTemplate',
+    'getTemplates',
+    'saveBody',
+  ]);
+
+  const customTemplate = await store.addCustomTemplate(
+    'Quick follow-up',
+    'Thanks again.',
+  );
+
+  const expectedCustomTemplate = {
+    id: 'custom-uuid-1',
+    title: 'Quick follow-up',
+    body: 'Thanks again.',
+    kind: 'custom',
+  };
+  const expectedState = {
+    version: 1,
+    overrides: {},
+    customTemplates: [expectedCustomTemplate],
+  };
+  assert.deepEqual(clone(customTemplate), expectedCustomTemplate);
+  assert.deepEqual(setCalls, [{
+    replyTemplateState: expectedState,
+  }]);
+  assert.deepEqual(storageValues.replyTemplateState, expectedState);
+  assert.deepEqual(clone(await store.getTemplates()), [
+    {
+      id: 'referral-follow-up',
+      title: 'Referral follow-up',
+      body: EXPECTED_DEFAULT_BODY,
+      kind: 'builtin',
+    },
+    expectedCustomTemplate,
+  ]);
+});
+
+test('addCustomTemplate trims the title and preserves exact body whitespace', async () => {
+  const { api, storageValues } = loadStore();
+
+  const customTemplate = await api.createStore().addCustomTemplate(
+    '  Quick follow-up  ',
+    '  Thanks again.\n',
+  );
+
+  assert.deepEqual(clone(customTemplate), {
+    id: 'custom-uuid-1',
+    title: 'Quick follow-up',
+    body: '  Thanks again.\n',
+    kind: 'custom',
+  });
+  assert.deepEqual(
+    storageValues.replyTemplateState.customTemplates[0],
+    clone(customTemplate),
+  );
+});
+
+test('addCustomTemplate rejects a blank title', async () => {
+  const { api, setCalls } = loadStore();
+
+  await assert.rejects(
+    api.createStore().addCustomTemplate(' \n\t ', 'Thanks again.'),
+    { message: 'Template title is required' },
+  );
+  assert.equal(setCalls.length, 0);
+});
+
+test('addCustomTemplate rejects a blank body', async () => {
+  const { api, setCalls } = loadStore();
+
+  await assert.rejects(
+    api.createStore().addCustomTemplate('Quick follow-up', ' \n\t '),
+    { message: 'Template body is required' },
+  );
+  assert.equal(setCalls.length, 0);
+});
+
+test('addCustomTemplate returns clones without exposing stored records', async () => {
+  const { api, rawSetCalls } = loadStore();
+  const store = api.createStore();
+
+  const addedTemplate = await store.addCustomTemplate(
+    'Quick follow-up',
+    'Thanks again.',
+  );
+  assert.notStrictEqual(
+    addedTemplate,
+    rawSetCalls[0].replyTemplateState.customTemplates[0],
+  );
+  addedTemplate.title = 'Mutated title';
+  addedTemplate.body = 'Mutated body';
+
+  const firstRead = await store.getTemplates();
+  assert.equal(firstRead[1].title, 'Quick follow-up');
+  assert.equal(firstRead[1].body, 'Thanks again.');
+  firstRead[1].body = 'Another mutation';
+
+  const secondRead = await store.getTemplates();
+  assert.equal(secondRead[1].body, 'Thanks again.');
+  assert.notStrictEqual(firstRead[1], secondRead[1]);
+});
+
+test('addCustomTemplate rejects a generated ID that already exists', async () => {
+  const { api, setCalls } = loadStore({
+    initialState: {
+      version: 1,
+      overrides: {},
+      customTemplates: [{
+        id: 'custom-uuid-1',
+        title: 'Existing template',
+        body: 'Existing body',
+        kind: 'custom',
+      }],
+    },
+  });
+
+  await assert.rejects(
+    api.createStore().addCustomTemplate('Quick follow-up', 'Thanks again.'),
+    { message: 'Template ID already exists' },
+  );
+  assert.equal(setCalls.length, 0);
+});
+
 test('saveBody persists a built-in override and getTemplates returns it', async () => {
   const { api, setCalls, storageValues } = loadStore();
   const store = api.createStore();
@@ -191,6 +326,38 @@ test('saveBody persists a built-in override and getTemplates returns it', async 
     body: 'Edited reply',
     kind: 'builtin',
   }]);
+});
+
+test('saveBody persists a custom template edit and getTemplates returns it', async () => {
+  const { api, storageValues } = loadStore();
+  const store = api.createStore();
+  const customTemplate = await store.addCustomTemplate(
+    'Quick follow-up',
+    'Thanks again.',
+  );
+
+  await store.saveBody(customTemplate.id, 'Updated');
+
+  assert.deepEqual(storageValues.replyTemplateState.customTemplates, [{
+    id: 'custom-uuid-1',
+    title: 'Quick follow-up',
+    body: 'Updated',
+    kind: 'custom',
+  }]);
+  assert.deepEqual(clone(await store.getTemplates()), [
+    {
+      id: 'referral-follow-up',
+      title: 'Referral follow-up',
+      body: EXPECTED_DEFAULT_BODY,
+      kind: 'builtin',
+    },
+    {
+      id: 'custom-uuid-1',
+      title: 'Quick follow-up',
+      body: 'Updated',
+      kind: 'custom',
+    },
+  ]);
 });
 
 test('saveBody rejects a blank body', async () => {
@@ -326,6 +493,44 @@ test('saveBody serializes storage updates with the in-context fallback', async (
   ]);
 
   assert.equal(getMaxActiveTransactions(), 1);
+});
+
+test('concurrent add and save operations preserve custom template data', async () => {
+  const { api, getMaxActiveTransactions, storageValues } = loadStore({
+    delayedStorage: true,
+    initialState: {
+      version: 1,
+      overrides: {},
+      customTemplates: [{
+        id: 'custom-existing',
+        title: 'Existing template',
+        body: 'Existing body',
+        kind: 'custom',
+      }],
+    },
+  });
+  const store = api.createStore();
+
+  await Promise.all([
+    store.addCustomTemplate('New template', 'New body'),
+    store.saveBody('custom-existing', 'Updated existing body'),
+  ]);
+
+  assert.equal(getMaxActiveTransactions(), 1);
+  assert.deepEqual(storageValues.replyTemplateState.customTemplates, [
+    {
+      id: 'custom-existing',
+      title: 'Existing template',
+      body: 'Updated existing body',
+      kind: 'custom',
+    },
+    {
+      id: 'custom-uuid-1',
+      title: 'New template',
+      body: 'New body',
+      kind: 'custom',
+    },
+  ]);
 });
 
 test('getTemplates rejects chrome.storage.local.get errors', async () => {

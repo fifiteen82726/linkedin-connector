@@ -138,9 +138,40 @@ Phone: 929-313-3362`,
 
   function createStore() {
     return {
+      async addCustomTemplate(title, body) {
+        if (!isNonBlankString(title)) {
+          throw new Error('Template title is required');
+        }
+        if (!isNonBlankString(body)) {
+          throw new Error('Template body is required');
+        }
+
+        return withWriteLock(async () => {
+          const state = await readState();
+          const template = {
+            id: `custom-${crypto.randomUUID()}`,
+            title: title.trim(),
+            body,
+            kind: 'custom',
+          };
+          if (
+            BUILTIN_TEMPLATE_IDS.has(template.id)
+            || state.customTemplates.some(
+              (existingTemplate) => existingTemplate.id === template.id,
+            )
+          ) {
+            throw new Error('Template ID already exists');
+          }
+
+          state.customTemplates.push(template);
+          await writeState(state);
+          return { ...template };
+        });
+      },
+
       async getTemplates() {
         const state = await readState();
-        return DEFAULT_TEMPLATES.map((template) => ({
+        const builtInTemplates = DEFAULT_TEMPLATES.map((template) => ({
           ...template,
           body: Object.prototype.hasOwnProperty.call(
             state.overrides,
@@ -149,19 +180,33 @@ Phone: 929-313-3362`,
             ? state.overrides[template.id]
             : template.body,
         }));
+        return builtInTemplates.concat(
+          state.customTemplates.map((template) => ({ ...template })),
+        );
       },
 
       async saveBody(templateId, body) {
-        if (!BUILTIN_TEMPLATE_IDS.has(templateId)) {
-          throw new Error('Template not found');
-        }
-        if (!isNonBlankString(body)) {
+        const isBuiltIn = BUILTIN_TEMPLATE_IDS.has(templateId);
+        if (isBuiltIn && !isNonBlankString(body)) {
           throw new Error('Template body is required');
         }
 
         await withWriteLock(async () => {
           const state = await readState();
-          state.overrides[templateId] = body;
+          if (isBuiltIn) {
+            state.overrides[templateId] = body;
+          } else {
+            const template = state.customTemplates.find(
+              (customTemplate) => customTemplate.id === templateId,
+            );
+            if (!template) {
+              throw new Error('Template not found');
+            }
+            if (!isNonBlankString(body)) {
+              throw new Error('Template body is required');
+            }
+            template.body = body;
+          }
           await writeState(state);
         });
       },
