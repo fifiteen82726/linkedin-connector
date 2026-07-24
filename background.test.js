@@ -145,6 +145,29 @@ test('background relays the final result to the selection tab and closes the pro
   assert.deepEqual(background.removedTabs, [42]);
 });
 
+test('background accepts a final result from the LinkedIn invite child frame', () => {
+  const background = loadBackground();
+  startBatchProfile(background);
+  background.tabUpdatedListeners[0](42, { status: 'complete' }, { id: 42 });
+
+  background.runtimeListeners[0](
+    {
+      source: 'linkedin-invite-extension',
+      action: 'batchProfileResult',
+      requestId: 'batch-1',
+      status: 'completed',
+      profileUrl: 'https://www.linkedin.com/preload/custom-invite/',
+    },
+    { frameId: 2, tab: { id: 42 } },
+    () => {},
+  );
+
+  assert.equal(background.sentMessages.length, 2);
+  assert.equal(background.sentMessages[1].tabId, 7);
+  assert.equal(background.sentMessages[1].message.action, 'batchProfileResult');
+  assert.equal(background.sentMessages[1].message.status, 'completed');
+});
+
 test('background retries when the profile content script is not ready yet', () => {
   const background = loadBackground({
     sendMessageResponses: [
@@ -164,4 +187,24 @@ test('background retries when the profile content script is not ready yet', () =
 
   assert.equal(background.sentMessages.length, 2);
   assert.equal(background.removedTabs.length, 0);
+});
+
+test('background restarts automation after the profile redirects', () => {
+  const background = loadBackground({
+    sendMessageResponses: [
+      { response: { accepted: true } },
+      { response: { accepted: true } },
+    ],
+  });
+  startBatchProfile(background);
+
+  background.tabUpdatedListeners[0](42, { status: 'complete' }, { id: 42 });
+  assert.equal(background.sentMessages.length, 1);
+
+  background.tabUpdatedListeners[0](42, { status: 'loading' }, { id: 42 });
+  background.tabUpdatedListeners[0](42, { status: 'complete' }, { id: 42 });
+
+  assert.equal(background.sentMessages.length, 2);
+  assert.equal(background.sentMessages[1].message.action, 'autoConnect');
+  assert.equal(background.sentMessages[1].message.requestId, 'batch-1');
 });

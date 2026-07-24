@@ -1109,6 +1109,67 @@ test('a child frame handles an invite-modal command from its parent', () => {
   assert.equal(receivedEvent.action, 'handleInviteModal');
 });
 
+test('a child invite frame reports the batch result with the parent request context', () => {
+  const sandbox = loadDetect(
+    makeDocument({ title: 'LinkedIn' }),
+    'https://www.linkedin.com/preload/custom-invite/?vanityName=yoojin-lim',
+    { isTopFrame: false },
+  );
+
+  for (const listener of sandbox.__windowListeners.message || []) {
+    listener({
+      data: {
+        source: 'linkedin-invite-extension',
+        action: 'handleInviteModal',
+        shouldSend: true,
+        profileName: 'Yoojin L.',
+        requestId: 'batch-1',
+        sourceTabId: 7,
+      },
+      source: sandbox.window.parent,
+      origin: 'https://www.linkedin.com',
+    });
+  }
+
+  assert.equal(sandbox.notifyBatchController('completed'), true);
+  assert.equal(sandbox.__runtimeMessages.length, 1);
+  assert.equal(sandbox.__runtimeMessages[0].action, 'batchProfileResult');
+  assert.equal(sandbox.__runtimeMessages[0].requestId, 'batch-1');
+  assert.equal(sandbox.__runtimeMessages[0].sourceTabId, 7);
+  assert.equal(sandbox.__runtimeMessages[0].status, 'completed');
+});
+
+test('a child invite frame ignores duplicate commands for the same batch request', () => {
+  const sandbox = loadDetect(
+    makeDocument({ title: 'LinkedIn' }),
+    'https://www.linkedin.com/preload/custom-invite/?vanityName=yoojin-lim',
+    { isTopFrame: false },
+  );
+  let calls = 0;
+  sandbox.handleAddNote = () => {
+    calls += 1;
+  };
+  const event = {
+    data: {
+      source: 'linkedin-invite-extension',
+      action: 'handleInviteModal',
+      shouldSend: true,
+      profileName: 'Yoojin L.',
+      requestId: 'batch-1',
+      sourceTabId: 7,
+    },
+    source: sandbox.window.parent,
+    origin: 'https://www.linkedin.com',
+  };
+
+  for (const listener of sandbox.__windowListeners.message || []) {
+    listener(event);
+    listener(event);
+  }
+
+  assert.equal(calls, 1);
+});
+
 test('the parent frame broadcasts invite-modal commands to child frames', () => {
   const postedMessages = [];
   const logs = [];
@@ -1134,6 +1195,10 @@ test('the parent frame broadcasts invite-modal commands to child frames', () => 
     },
   });
   const sandbox = loadDetect(document, undefined, { logs });
+  vm.runInContext(
+    "activeBatchAutomationRequestId = 'batch-1'; activeBatchAutomationSourceTabId = 7",
+    sandbox,
+  );
 
   sandbox.broadcastInviteModalCommand(false, 'Yoojin L.');
 
@@ -1143,6 +1208,8 @@ test('the parent frame broadcasts invite-modal commands to child frames', () => 
   assert.equal(postedMessages[0].message.action, 'handleInviteModal');
   assert.equal(postedMessages[0].message.shouldSend, false);
   assert.equal(postedMessages[0].message.profileName, 'Yoojin L.');
+  assert.equal(postedMessages[0].message.requestId, 'batch-1');
+  assert.equal(postedMessages[0].message.sourceTabId, 7);
 
   const diagnosticEvents = logs
     .map((entry) => entry[1])
@@ -1168,6 +1235,28 @@ test('the parent frame broadcasts invite-modal commands to child frames', () => 
   );
   assert.equal(delegatedEvent.frameCount, 2);
   assert.equal(delegatedEvent.recipients, 1);
+});
+
+test('the parent frame ignores LinkedIn frames that are not invite frames', () => {
+  const postedMessages = [];
+  const frame = makeElement({
+    src: 'https://merchantpool1.linkedin.com/',
+    contentWindow: {
+      postMessage(message) {
+        postedMessages.push(message);
+      },
+    },
+  });
+  const document = makeDocument({
+    querySelectorAllMap: {
+      iframe: [frame],
+    },
+  });
+  const sandbox = loadDetect(document);
+
+  sandbox.broadcastInviteModalCommand(true, 'Yoojin L.');
+
+  assert.equal(postedMessages.length, 0);
 });
 
 test('the top frame keeps polling after delegating to a child frame', () => {
@@ -1209,6 +1298,41 @@ test('the top frame keeps polling after delegating to a child frame', () => {
   assert.equal(timers.length, 1);
   timers.shift()();
   assert.equal(addNoteButton.clicked, true);
+});
+
+test('the top frame delegates when the LinkedIn invite frame appears late', () => {
+  const timers = [];
+  const postedMessages = [];
+  const frames = [];
+  const frame = makeElement({
+    src: 'https://www.linkedin.com/preload/?_bprMode=vanilla',
+    contentWindow: {
+      postMessage(message) {
+        postedMessages.push(message);
+      },
+    },
+  });
+  const document = makeDocument({
+    querySelectorAllMap: {
+      iframe: frames,
+    },
+  });
+  const sandbox = loadDetect(document, undefined, {
+    setTimeout(callback) {
+      timers.push(callback);
+    },
+  });
+
+  sandbox.handleAddNote(true);
+  assert.equal(postedMessages.length, 0);
+  assert.equal(timers.length, 1);
+
+  frames.push(frame);
+  timers.shift()();
+
+  assert.equal(postedMessages.length, 1);
+  assert.equal(postedMessages[0].action, 'handleInviteModal');
+  assert.equal(postedMessages[0].shouldSend, true);
 });
 
 test('a child frame polls locally without delegating to nested LinkedIn frames', () => {

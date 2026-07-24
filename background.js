@@ -107,8 +107,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const sourceTabId = storedJob
       ? storedJob.sourceTabId
       : message.sourceTabId;
-    if (sender.frameId !== 0 ||
-        !Number.isInteger(sourceTabId) ||
+    if (!Number.isInteger(sourceTabId) ||
+        (!storedJob && sender.frameId !== 0) ||
         (storedJob && storedJob.requestId !== message.requestId)) {
       return false;
     }
@@ -132,6 +132,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === 'loading') {
+    const job = batchJobsByTargetTab.get(tabId);
+    if (job) {
+      job.started = false;
+    }
+    return;
+  }
+
   if (changeInfo.status === 'complete') {
     startBatchAutomation(tabId);
   }

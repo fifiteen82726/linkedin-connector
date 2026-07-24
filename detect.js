@@ -22,8 +22,11 @@ let activeAddNoteRequest = null;
 let activeBatchAutomationRequestId = null;
 let activeBatchAutomationSourceTabId = null;
 let activeBatchProfileRequest = null;
+let activeInviteModalCommandId = null;
+let lastHandledInviteModalCommandId = null;
 let nextAddNoteRequestId = 1;
 let nextBatchRequestId = 1;
+let nextInviteModalCommandId = 1;
 let autoSelectRunning = false;
 
 function notifyBatchController(status, reason = '') {
@@ -813,7 +816,10 @@ function broadcastInviteModalCommand(shouldSend, profileName) {
     source: INVITE_MESSAGE_SOURCE,
     action: 'handleInviteModal',
     shouldSend,
-    profileName
+    profileName,
+    commandId: activeInviteModalCommandId,
+    requestId: activeBatchAutomationRequestId,
+    sourceTabId: activeBatchAutomationSourceTabId
   };
   let recipients = 0;
   const frames = Array.from(document.querySelectorAll('iframe'));
@@ -833,12 +839,15 @@ function broadcastInviteModalCommand(shouldSend, profileName) {
       const frameUrl = new URL(frameSource, window.location.href);
       const isLinkedInFrame = frameUrl.hostname === 'linkedin.com' ||
         frameUrl.hostname.endsWith('.linkedin.com');
+      const isInviteFrame = isLinkedInFrame &&
+        /^\/preload(?:\/|$)/.test(frameUrl.pathname);
 
       logDiagnostic('FRAME_DISCOVERY', {
         frameIndex,
         source: frameSource,
         origin: frameUrl.origin,
         isLinkedInFrame,
+        isInviteFrame,
         hasContentWindow,
         contentDocumentAccessible
       });
@@ -848,6 +857,15 @@ function broadcastInviteModalCommand(shouldSend, profileName) {
           frameIndex,
           source: frameSource,
           reason: 'not-linkedin-frame'
+        });
+        continue;
+      }
+
+      if (!isInviteFrame) {
+        logDiagnostic('FRAME_MESSAGE_SKIPPED', {
+          frameIndex,
+          source: frameSource,
+          reason: 'not-invite-frame'
         });
         continue;
       }
@@ -904,6 +922,15 @@ window.addEventListener('message', function(event) {
   if (window !== window.top &&
       event.source === window.parent &&
       isInviteModalMessage) {
+    const commandId = event.data.commandId || event.data.requestId || null;
+    if (commandId && commandId === lastHandledInviteModalCommandId) {
+      return;
+    }
+    lastHandledInviteModalCommandId = commandId;
+    activeBatchAutomationRequestId = event.data.requestId || null;
+    activeBatchAutomationSourceTabId = Number.isInteger(event.data.sourceTabId)
+      ? event.data.sourceTabId
+      : null;
     console.log('%c HANDLING INVITE MODAL IN CHILD FRAME', 'background: #8e44ad; color: #ffffff; font-size: 12px; font-weight: bold;');
     handleAddNote(
       event.data.shouldSend,
@@ -1268,6 +1295,8 @@ function findConnectButton() {
 }
 
 function startInviteModalFlow(shouldSend, profileName) {
+  activeInviteModalCommandId = `invite-${nextInviteModalCommandId}`;
+  nextInviteModalCommandId += 1;
   handleAddNote(shouldSend, ADD_NOTE_INITIAL_RETRIES, profileName);
 }
 
@@ -1433,7 +1462,7 @@ function handleAddNote(
   logAddNoteScan(retriesRemaining);
   const addNoteButton = findAddNoteButton();
   if (!addNoteButton) {
-    if (window === window.top && retriesRemaining === ADD_NOTE_INITIAL_RETRIES) {
+    if (window === window.top) {
       const delegatedFrames = broadcastInviteModalCommand(shouldSend, profileName);
       if (delegatedFrames > 0) {
         console.log('Invite modal handling also delegated to child frame');
