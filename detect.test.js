@@ -8,7 +8,13 @@ test('manifest configures LinkedIn content scripts and the batch background work
 
   assert.equal(manifest.content_scripts[0].all_frames, true);
   assert.deepEqual(manifest.content_scripts[0].matches, ['https://*.linkedin.com/*']);
-  assert.ok(manifest.permissions.includes('tabs'));
+  assert.deepEqual(manifest.permissions, ['storage', 'tabs', 'clipboardWrite']);
+  assert.deepEqual(manifest.content_scripts[0].js, [
+    'reply-template-store.js',
+    'reply-templates.js',
+    'detect.js',
+  ]);
+  assert.deepEqual(manifest.content_scripts[0].css, ['reply-templates.css']);
   assert.equal(manifest.background.service_worker, 'background.js');
 });
 
@@ -95,10 +101,16 @@ function loadDetect(
   href = 'https://www.linkedin.com/in/yoojin-lim/',
   {
     clearTimeout = () => {},
+    errors = [],
     isTopFrame = true,
     logs = [],
     opener = null,
     open = () => null,
+    replyTemplates = {
+      showDialog() {
+        return Promise.resolve();
+      },
+    },
     runtimeSendMessage = null,
     setTimeout = () => {},
     settings = {},
@@ -128,6 +140,7 @@ function loadDetect(
   windowObject.parent = isTopFrame ? windowObject : {};
 
   const sandbox = {
+    __errors: errors,
     __logs: logs,
     __mutationObservers: mutationObservers,
     __runtimeListeners: runtimeListeners,
@@ -161,6 +174,9 @@ function loadDetect(
       },
     },
     console: {
+      error(...args) {
+        errors.push(args);
+      },
       log(...args) {
         logs.push(args);
       },
@@ -182,6 +198,7 @@ function loadDetect(
 
       observe() {}
     },
+    ReplyTemplates: replyTemplates,
     setTimeout,
     URL,
     window: windowObject,
@@ -1022,4 +1039,119 @@ test('Alt+W does not start profile automation inside a child frame', () => {
   });
 
   assert.equal(calls, 0);
+});
+
+test('Option+E opens reply templates once and handles the event in the top frame', () => {
+  const listeners = {};
+  const document = makeDocument({ listeners });
+  let calls = 0;
+  let prevented = 0;
+  let stopped = 0;
+  loadDetect(document, undefined, {
+    replyTemplates: {
+      showDialog() {
+        calls += 1;
+        return Promise.resolve();
+      },
+    },
+  });
+
+  listeners.keydown({
+    altKey: true,
+    code: 'KeyE',
+    ctrlKey: false,
+    key: '´',
+    keyCode: 69,
+    location: 0,
+    metaKey: false,
+    preventDefault() {
+      prevented += 1;
+    },
+    stopPropagation() {
+      stopped += 1;
+    },
+    which: 69,
+  });
+
+  assert.equal(calls, 1);
+  assert.equal(prevented, 1);
+  assert.equal(stopped, 1);
+});
+
+test('Option+E does not open reply templates inside a child frame', () => {
+  const listeners = {};
+  const document = makeDocument({ listeners });
+  let calls = 0;
+  loadDetect(
+    document,
+    'https://www.linkedin.com/preload/?_bprMode=vanilla',
+    {
+      isTopFrame: false,
+      replyTemplates: {
+        showDialog() {
+          calls += 1;
+          return Promise.resolve();
+        },
+      },
+    },
+  );
+
+  listeners.keydown({
+    altKey: true,
+    code: 'KeyE',
+    ctrlKey: false,
+    key: 'e',
+    keyCode: 69,
+    location: 0,
+    metaKey: false,
+    preventDefault() {},
+    stopPropagation() {},
+    which: 69,
+  });
+
+  assert.equal(calls, 0);
+});
+
+test('Option+E logs showDialog rejections without an unhandled rejection', async () => {
+  const listeners = {};
+  const document = makeDocument({ listeners });
+  const errors = [];
+  const unhandledRejections = [];
+  const dialogError = new Error('dialog failed');
+  const onUnhandledRejection = (error) => {
+    unhandledRejections.push(error);
+  };
+  process.on('unhandledRejection', onUnhandledRejection);
+
+  try {
+    loadDetect(document, undefined, {
+      errors,
+      replyTemplates: {
+        showDialog() {
+          return Promise.reject(dialogError);
+        },
+      },
+    });
+
+    listeners.keydown({
+      altKey: true,
+      code: 'KeyE',
+      ctrlKey: false,
+      key: 'e',
+      keyCode: 69,
+      location: 0,
+      metaKey: false,
+      preventDefault() {},
+      stopPropagation() {},
+      which: 69,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(unhandledRejections.length, 0);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0][0], /Failed to open reply templates/);
+    assert.equal(errors[0][1], dialogError);
+  } finally {
+    process.removeListener('unhandledRejection', onUnhandledRejection);
+  }
 });

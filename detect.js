@@ -178,6 +178,12 @@ document.addEventListener('keydown', function(event) {
         console.log('%c HOTKEY "Option+S" DETECTED! (Open Settings)', 'background: #ff0000; color: #ffffff; font-size: 16px; font-weight: bold;');
         showSettingsDialog();
         break;
+      case 'KeyE':
+        console.log('%c HOTKEY "Option+E" DETECTED! (Open Reply Templates)', 'background: #ff0000; color: #ffffff; font-size: 16px; font-weight: bold;');
+        Promise.resolve(ReplyTemplates.showDialog()).catch((error) => {
+          console.error('Failed to open reply templates:', error);
+        });
+        break;
       case 'KeyO':
         showFloatingPanel = !showFloatingPanel; // Toggle the floating panel
         console.log(`%c HOTKEY "Alt+O" DETECTED! (Floating Panel ${showFloatingPanel ? 'Enabled' : 'Disabled'})`, 'background: #ff0000; color: #ffffff; font-size: 16px; font-weight: bold;');

@@ -5,7 +5,8 @@
   "description": "Linkedin Invite Automation",
   "permissions": [
     "storage",
-    "tabs"
+    "tabs",
+    "clipboardWrite"
   ],
   "background": {
     "service_worker": "background.js"
@@ -22,7 +23,12 @@
   "content_scripts": [
     {
       "matches": ["https://*.linkedin.com/*"],
-      "js": ["detect.js"],
+      "js": [
+        "reply-template-store.js",
+        "reply-templates.js",
+        "detect.js"
+      ],
+      "css": ["reply-templates.css"],
       "all_frames": true
     }
   ],
