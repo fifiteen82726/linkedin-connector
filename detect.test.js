@@ -21,9 +21,14 @@ test('manifest configures LinkedIn content scripts and the batch background work
 test('basic template defaults to the Sr. Data Engineer role everywhere', () => {
   const detectSource = fs.readFileSync('detect.js', 'utf8');
   const optionsSource = fs.readFileSync('options.js', 'utf8');
+  const readmeSource = fs.readFileSync('README.md', 'utf8');
 
   assert.match(detectSource, /myRole:\s*'Sr\. Data Engineer'/);
   assert.match(optionsSource, /myRole:\s*'Sr\. Data Engineer'/);
+  assert.match(
+    readmeSource,
+    /currently a Sr\. Data Engineer at American Airlines/,
+  );
 });
 
 function makeElement({

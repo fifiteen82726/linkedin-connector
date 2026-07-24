@@ -897,6 +897,62 @@ test('editing while Save is pending does not mark the newer body as Saved', asyn
   assert.equal(status.className, 'reply-template-status');
 });
 
+test('a pending Save does not mark a rerendered newer draft as Saved', async () => {
+  const doc = new FakeDocument();
+  const save = deferred();
+  const createdTemplate = sampleTemplate({
+    id: 'custom-1',
+    title: 'New template',
+    body: 'New body',
+    kind: 'custom',
+  });
+  let getCalls = 0;
+  const store = {
+    async addCustomTemplate() {
+      return createdTemplate;
+    },
+    async getTemplates() {
+      getCalls += 1;
+      return getCalls === 1
+        ? [sampleTemplate()]
+        : [sampleTemplate(), createdTemplate];
+    },
+    saveBody() {
+      return save.promise;
+    },
+  };
+  const { api } = loadReplyTemplates({ doc, store });
+  const backdrop = api.showDialog({ doc, store });
+  await settle();
+  const originalTextarea = backdrop.querySelector('textarea');
+  const saveButton = findByText(backdrop, 'button', 'Save');
+
+  originalTextarea.value = 'Body A';
+  const saveClick = saveButton.emit('click');
+  await Promise.resolve();
+
+  await findByText(backdrop, 'button', 'Add template').emit('click');
+  const form = backdrop.querySelector('form');
+  form.querySelector('input').value = 'New template';
+  form.querySelector('textarea').value = 'New body';
+  await form.emit('submit');
+
+  const currentTextarea = backdrop
+    .querySelector('.reply-template-list')
+    .querySelector('textarea');
+  assert.notStrictEqual(currentTextarea, originalTextarea);
+  currentTextarea.value = 'Body B';
+  await currentTextarea.emit('input');
+
+  save.resolve();
+  await saveClick;
+
+  assert.notEqual(
+    backdrop.querySelector('[role="status"]').textContent,
+    'Saved',
+  );
+});
+
 test('Save and Copy buttons ignore duplicate clicks while pending and recover', async () => {
   const doc = new FakeDocument();
   const save = deferred();

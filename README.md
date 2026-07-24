@@ -34,16 +34,13 @@ A browser extension that simplifies and automates the LinkedIn connection proces
 
 ## Customizing Your Message
 
-To customize the message template, edit the `customMessage` variable in the `detect.js` file:
+Press `Option+S` (`Alt+S` on non-macOS keyboards) on LinkedIn to open
+the connection-message settings. The default introduction says you are
+currently a Sr. Data Engineer at American Airlines.
 
-```javascript
-const customMessage = `Hi ${firstName},
-
-Hope you are doing well!
-I'm Sunny, currently a Data Engineer at American Airlines. Impressed by your background, I'd like to connect and seek your referral for data job opportunities. Please let me share my resume once we connect on LinkedIn. Thanks!`;
-```
-
-Replace the text with your own personalized message. The `${firstName}` variable will be automatically replaced with the recipient's first name.
+You can edit the name, role, company, target role, and message template.
+The template supports `{{firstName}}`, `{{myName}}`, `{{myRole}}`,
+`{{myCompany}}`, and `{{targetRole}}` placeholders.
 
 ## Reply Templates
 

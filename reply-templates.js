@@ -393,7 +393,14 @@
         runOnce(saveButton, async () => {
           const body = textarea.value;
           const saved = await actions.save(template.id, body);
-          if (saved && textarea.value !== body) {
+          const currentTemplate = renderedTemplates.get(template.id);
+          if (
+            saved
+            && (
+              !currentTemplate
+              || currentTemplate.textarea.value !== body
+            )
+          ) {
             clearSavedStatus();
           }
         });
