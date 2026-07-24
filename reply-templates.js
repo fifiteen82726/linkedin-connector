@@ -239,21 +239,28 @@
     let actions;
 
     function render(templates) {
-      const templateElements = templates.map((template) => {
+      let firstTextarea = null;
+      const templateElements = templates.map((template, index) => {
         const item = createElement(doc, 'section', 'reply-template-item');
+        const itemTitleId = `${MODAL_ID}-template-${index}-title`;
         const itemTitle = createElement(
           doc,
           'h3',
           'reply-template-item-title',
           template.title,
         );
+        itemTitle.id = itemTitleId;
         const textarea = createElement(
           doc,
           'textarea',
           'reply-template-textarea',
         );
+        textarea.setAttribute('aria-labelledby', itemTitleId);
         textarea.value = template.body;
         textarea.rows = 7;
+        if (index === 0) {
+          firstTextarea = textarea;
+        }
 
         const itemActions = createElement(
           doc,
@@ -282,6 +289,7 @@
       });
 
       list.replaceChildren(...templateElements);
+      return firstTextarea;
     }
 
     actions = createActions({
@@ -332,7 +340,10 @@
       .then(() => store.getTemplates())
       .then((templates) => {
         if (!closed) {
-          render(templates);
+          const firstTextarea = render(templates);
+          if (firstTextarea) {
+            firstTextarea.focus();
+          }
         }
       })
       .catch((error) => {

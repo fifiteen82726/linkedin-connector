@@ -607,8 +607,22 @@ test('showDialog builds an accessible modal and safely renders template text', a
   assert.equal(status.getAttribute('aria-live'), 'polite');
   const templateList = backdrop.querySelector('.reply-template-list');
   assert.equal(templateList.querySelectorAll('textarea').length, 2);
+  const templateTitles = templateList.querySelectorAll('h3');
+  const templateTextareas = templateList.querySelectorAll('textarea');
+  assert.equal(
+    new Set(templateTitles.map(({ id }) => id)).size,
+    templateTitles.length,
+  );
+  for (let index = 0; index < templateTitles.length; index += 1) {
+    const labelledBy = templateTextareas[index].getAttribute(
+      'aria-labelledby',
+    );
+    assert.ok(labelledBy);
+    assert.equal(labelledBy, templateTitles[index].id);
+    assert.equal(doc.getElementById(labelledBy), templateTitles[index]);
+  }
   assert.deepEqual(
-    templateList.querySelectorAll('textarea').map(({ value }) => value),
+    templateTextareas.map(({ value }) => value),
     ['<script>unsafe()</script>\nExact text', 'Second body'],
   );
   assert.equal(
@@ -617,6 +631,33 @@ test('showDialog builds an accessible modal and safely renders template text', a
   );
   assert.equal(backdrop.querySelectorAll('script').length, 0);
   assert.doesNotMatch(readRequiredFile(SCRIPT_PATH), /\binnerHTML\b/);
+});
+
+test('showDialog focuses the first template textarea after initial render', async () => {
+  const doc = new FakeDocument();
+  const store = {
+    async getTemplates() {
+      return [
+        sampleTemplate(),
+        sampleTemplate({
+          id: 'custom-1',
+          title: 'Custom reply',
+          body: 'Second body',
+          kind: 'custom',
+        }),
+      ];
+    },
+  };
+  const { api } = loadReplyTemplates({ doc, store });
+
+  const backdrop = api.showDialog({ doc, store });
+  await settle();
+
+  const firstTextarea = backdrop
+    .querySelector('.reply-template-list')
+    .querySelector('textarea');
+  assert.equal(firstTextarea.focusCount, 1);
+  assert.equal(doc.activeElement, firstTextarea);
 });
 
 test('template Save and Copy use current textarea values', async () => {
