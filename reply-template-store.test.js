@@ -1,8 +1,10 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const path = require('node:path');
 const test = require('node:test');
 const vm = require('node:vm');
 
+const STORE_PATH = path.join(__dirname, 'reply-template-store.js');
 const EXPECTED_DEFAULT_BODY = `Yes, thank you so much for connecting with me. The job market is brutal now, I truly appreciate your time and support. I’m very interested in this position. I've attached my resume. Let me know if you need more info.
 
 **Job - link**
@@ -19,14 +21,28 @@ function clone(value) {
 }
 
 function loadStore({
+  cloneStorageReads = true,
+  delayedStorage = false,
   initialState,
   getError = null,
+  lockManager,
   setError = null,
 } = {}) {
+  let activeTransactions = 0;
+  let maxActiveTransactions = 0;
+  const rawSetCalls = [];
   const storageValues = {};
   const setCalls = [];
   if (initialState !== undefined) {
     storageValues.replyTemplateState = clone(initialState);
+  }
+
+  function schedule(callback) {
+    if (delayedStorage) {
+      setImmediate(callback);
+    } else {
+      callback();
+    }
   }
 
   const chrome = {
@@ -36,22 +52,44 @@ function loadStore({
     storage: {
       local: {
         get(key, callback) {
-          chrome.runtime.lastError = getError
-            ? { message: getError }
-            : null;
-          callback({ [key]: clone(storageValues[key]) });
-          chrome.runtime.lastError = null;
+          if (delayedStorage) {
+            activeTransactions += 1;
+            maxActiveTransactions = Math.max(
+              maxActiveTransactions,
+              activeTransactions,
+            );
+          }
+          schedule(() => {
+            chrome.runtime.lastError = getError
+              ? { message: getError }
+              : null;
+            callback({
+              [key]: cloneStorageReads
+                ? clone(storageValues[key])
+                : storageValues[key],
+            });
+            chrome.runtime.lastError = null;
+            if (delayedStorage && getError) {
+              activeTransactions -= 1;
+            }
+          });
         },
         set(values, callback) {
-          chrome.runtime.lastError = setError
-            ? { message: setError }
-            : null;
-          setCalls.push(clone(values));
-          if (!setError) {
-            Object.assign(storageValues, clone(values));
-          }
-          callback();
-          chrome.runtime.lastError = null;
+          schedule(() => {
+            chrome.runtime.lastError = setError
+              ? { message: setError }
+              : null;
+            rawSetCalls.push(values);
+            setCalls.push(clone(values));
+            if (!setError) {
+              Object.assign(storageValues, clone(values));
+            }
+            callback();
+            chrome.runtime.lastError = null;
+            if (delayedStorage) {
+              activeTransactions -= 1;
+            }
+          });
         },
       },
     },
@@ -65,14 +103,17 @@ function loadStore({
     },
     Promise,
   };
+  if (lockManager) {
+    sandbox.navigator = {
+      locks: lockManager,
+    };
+  }
   sandbox.globalThis = sandbox;
 
   vm.createContext(sandbox);
-  const source = fs.existsSync('reply-template-store.js')
-    ? fs.readFileSync('reply-template-store.js', 'utf8')
-    : '';
+  const source = fs.readFileSync(STORE_PATH, 'utf8');
   vm.runInContext(source, sandbox, {
-    filename: 'reply-template-store.js',
+    filename: STORE_PATH,
   });
   assert.ok(
     sandbox.ReplyTemplateStore,
@@ -81,8 +122,30 @@ function loadStore({
 
   return {
     api: sandbox.ReplyTemplateStore,
+    getMaxActiveTransactions() {
+      return maxActiveTransactions;
+    },
+    rawSetCalls,
     setCalls,
     storageValues,
+  };
+}
+
+function makeSerialLockManager() {
+  const requestedNames = [];
+  let tail = Promise.resolve();
+
+  return {
+    requestedNames,
+    request(name, callback) {
+      requestedNames.push(name);
+      const result = tail.then(callback, callback);
+      tail = result.then(
+        () => undefined,
+        () => undefined,
+      );
+      return result;
+    },
   };
 }
 
@@ -141,6 +204,16 @@ test('saveBody rejects a blank body', async () => {
   assert.equal(setCalls.length, 0);
 });
 
+test('saveBody rejects an unknown template ID', async () => {
+  const { api, setCalls } = loadStore();
+
+  await assert.rejects(
+    api.createStore().saveBody('missing-template', 'Edited reply'),
+    { message: 'Template not found' },
+  );
+  assert.equal(setCalls.length, 0);
+});
+
 test('saveBody normalizes invalid stored state before persisting', async () => {
   const { api, storageValues } = loadStore({
     initialState: {
@@ -160,6 +233,99 @@ test('saveBody normalizes invalid stored state before persisting', async () => {
     },
     customTemplates: [],
   });
+});
+
+test('normalization keeps valid siblings, drops malformed entries, and clones custom records', async () => {
+  const { api, rawSetCalls, storageValues } = loadStore({
+    cloneStorageReads: false,
+    initialState: {
+      version: 1,
+      overrides: {
+        'referral-follow-up': 'Stored reply',
+        'missing-template': 'Dead override',
+        blank: '   ',
+        invalid: 42,
+      },
+      customTemplates: [
+        {
+          id: 'custom-1',
+          title: 'Custom one',
+          body: 'Custom body',
+          kind: 'builtin',
+          extra: true,
+        },
+        null,
+        {
+          id: '',
+          title: 'Missing ID',
+          body: 'Body',
+        },
+        {
+          id: 'custom-2',
+          title: 'Missing body',
+          body: '  ',
+        },
+      ],
+    },
+  });
+  const store = api.createStore();
+
+  assert.equal((await store.getTemplates())[0].body, 'Stored reply');
+
+  const originalCustomRecord =
+    storageValues.replyTemplateState.customTemplates[0];
+  await store.saveBody('referral-follow-up', 'Next reply');
+
+  assert.deepEqual(clone(rawSetCalls[0].replyTemplateState), {
+    version: 1,
+    overrides: {
+      'referral-follow-up': 'Next reply',
+    },
+    customTemplates: [{
+      id: 'custom-1',
+      title: 'Custom one',
+      body: 'Custom body',
+      kind: 'custom',
+    }],
+  });
+  assert.notStrictEqual(
+    rawSetCalls[0].replyTemplateState.customTemplates[0],
+    originalCustomRecord,
+  );
+});
+
+test('saveBody serializes storage updates with a stable Web Lock', async () => {
+  const lockManager = makeSerialLockManager();
+  const { api, getMaxActiveTransactions } = loadStore({
+    delayedStorage: true,
+    lockManager,
+  });
+  const store = api.createStore();
+
+  await Promise.all([
+    store.saveBody('referral-follow-up', 'First reply'),
+    store.saveBody('referral-follow-up', 'Second reply'),
+  ]);
+
+  assert.equal(getMaxActiveTransactions(), 1);
+  assert.deepEqual(lockManager.requestedNames, [
+    'linkedin-connector-reply-template-state-write',
+    'linkedin-connector-reply-template-state-write',
+  ]);
+});
+
+test('saveBody serializes storage updates with the in-context fallback', async () => {
+  const { api, getMaxActiveTransactions } = loadStore({
+    delayedStorage: true,
+  });
+  const store = api.createStore();
+
+  await Promise.all([
+    store.saveBody('referral-follow-up', 'First reply'),
+    store.saveBody('referral-follow-up', 'Second reply'),
+  ]);
+
+  assert.equal(getMaxActiveTransactions(), 1);
 });
 
 test('getTemplates rejects chrome.storage.local.get errors', async () => {

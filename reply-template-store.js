@@ -2,6 +2,7 @@
   'use strict';
 
   const STORAGE_KEY = 'replyTemplateState';
+  const WRITE_LOCK_NAME = 'linkedin-connector-reply-template-state-write';
   const DEFAULT_TEMPLATES = Object.freeze([
     Object.freeze({
       id: 'referral-follow-up',
@@ -17,6 +18,10 @@ Phone: 929-313-3362`,
       kind: 'builtin',
     }),
   ]);
+  const BUILTIN_TEMPLATE_IDS = new Set(
+    DEFAULT_TEMPLATES.map((template) => template.id),
+  );
+  let writeQueue = Promise.resolve();
 
   function emptyState() {
     return {
@@ -26,29 +31,63 @@ Phone: 929-313-3362`,
     };
   }
 
+  function isRecord(value) {
+    return value !== null
+      && typeof value === 'object'
+      && !Array.isArray(value);
+  }
+
+  function isNonBlankString(value) {
+    return typeof value === 'string' && Boolean(value.trim());
+  }
+
+  function normalizeOverrides(overrides) {
+    if (!isRecord(overrides)) {
+      return {};
+    }
+
+    const normalized = {};
+    for (const template of DEFAULT_TEMPLATES) {
+      const body = overrides[template.id];
+      if (
+        Object.prototype.hasOwnProperty.call(overrides, template.id)
+        && isNonBlankString(body)
+      ) {
+        normalized[template.id] = body;
+      }
+    }
+    return normalized;
+  }
+
+  function normalizeCustomTemplates(customTemplates) {
+    if (!Array.isArray(customTemplates)) {
+      return [];
+    }
+
+    return customTemplates
+      .filter((template) => (
+        isRecord(template)
+        && isNonBlankString(template.id)
+        && isNonBlankString(template.title)
+        && isNonBlankString(template.body)
+      ))
+      .map((template) => ({
+        id: template.id,
+        title: template.title,
+        body: template.body,
+        kind: 'custom',
+      }));
+  }
+
   function normalizeState(state) {
-    const hasValidOverrides = state
-      && typeof state.overrides === 'object'
-      && state.overrides !== null
-      && !Array.isArray(state.overrides)
-      && Object.values(state.overrides).every(
-        (body) => typeof body === 'string' && body.trim(),
-      );
-    if (
-      !state
-      || typeof state !== 'object'
-      || Array.isArray(state)
-      || state.version !== 1
-      || !hasValidOverrides
-      || !Array.isArray(state.customTemplates)
-    ) {
+    if (!isRecord(state) || state.version !== 1) {
       return emptyState();
     }
 
     return {
       version: 1,
-      overrides: { ...state.overrides },
-      customTemplates: [...state.customTemplates],
+      overrides: normalizeOverrides(state.overrides),
+      customTemplates: normalizeCustomTemplates(state.customTemplates),
     };
   }
 
@@ -80,6 +119,23 @@ Phone: 929-313-3362`,
     });
   }
 
+  function withWriteLock(update) {
+    if (
+      typeof navigator !== 'undefined'
+      && navigator.locks
+      && typeof navigator.locks.request === 'function'
+    ) {
+      return navigator.locks.request(WRITE_LOCK_NAME, update);
+    }
+
+    const result = writeQueue.then(update, update);
+    writeQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
   function createStore() {
     return {
       async getTemplates() {
@@ -96,13 +152,18 @@ Phone: 929-313-3362`,
       },
 
       async saveBody(templateId, body) {
-        if (typeof body !== 'string' || !body.trim()) {
+        if (!BUILTIN_TEMPLATE_IDS.has(templateId)) {
+          throw new Error('Template not found');
+        }
+        if (!isNonBlankString(body)) {
           throw new Error('Template body is required');
         }
 
-        const state = await readState();
-        state.overrides[templateId] = body;
-        await writeState(state);
+        await withWriteLock(async () => {
+          const state = await readState();
+          state.overrides[templateId] = body;
+          await writeState(state);
+        });
       },
     };
   }
