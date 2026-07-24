@@ -25,6 +25,9 @@ test('basic template defaults to the Sr. Data Engineer role everywhere', () => {
 });
 
 function makeElement({
+  attributes = {},
+  classNames = [],
+  disabled = false,
   textContent = '',
   href = '',
   src = '',
@@ -32,21 +35,49 @@ function makeElement({
   contentDocument = null,
   contentWindow = null,
   shadowRoot = null,
+  nodeType = 1,
   querySelectorMap = {},
   querySelectorAllMap = {},
 } = {}) {
+  const classes = new Set(classNames);
+  const listeners = {};
   return {
     textContent,
     href,
     src,
+    disabled,
     contentDocument,
     contentWindow,
     shadowRoot,
+    nodeType,
+    style: {},
     clicked: false,
     classList: {
-      contains() {
-        return false;
+      add(className) {
+        classes.add(className);
       },
+      contains(className) {
+        return classes.has(className);
+      },
+      remove(className) {
+        classes.delete(className);
+      },
+      toggle(className, force) {
+        if (force === undefined) {
+          if (classes.has(className)) {
+            classes.delete(className);
+            return false;
+          }
+          classes.add(className);
+          return true;
+        }
+        if (force) classes.add(className);
+        else classes.delete(className);
+        return force;
+      },
+    },
+    addEventListener(type, handler) {
+      listeners[type] = handler;
     },
     closest() {
       return null;
@@ -59,7 +90,10 @@ function makeElement({
       if (name === 'aria-label') return ariaLabel;
       if (name === 'href') return href;
       if (name === 'src') return src;
-      return null;
+      return attributes[name] ?? null;
+    },
+    setAttribute(name, value) {
+      attributes[name] = String(value);
     },
     querySelector(selector) {
       return querySelectorMap[selector] || null;
@@ -181,7 +215,12 @@ function loadDetect(
     MutationObserver: class {
       constructor(callback) {
         this.callback = callback;
+        this.disconnected = false;
         mutationObservers.push(this);
+      }
+
+      disconnect() {
+        this.disconnected = true;
       }
 
       observe() {}
@@ -200,6 +239,69 @@ function loadDetect(
   });
   return sandbox;
 }
+
+function makeProfileCard({ name, title, url }) {
+  const link = makeElement({ href: url });
+  const nameElement = makeElement({ textContent: name });
+  const titleElement = makeElement({ textContent: title });
+  return makeElement({
+    querySelectorMap: {
+      'a[data-test-app-aware-link][href*="/in/"], a[href*="/in/"]': link,
+      '.artdeco-entity-lockup__title': nameElement,
+      '.artdeco-entity-lockup__subtitle, .org-people-profile-card__profile-title':
+        titleElement,
+    },
+  });
+}
+
+test('extractProfileCandidate reads name, title, and profile URL', () => {
+  const card = makeProfileCard({
+    name: 'Amy Chen',
+    title: 'Data Engineer',
+    url: 'https://www.linkedin.com/in/amy-chen/',
+  });
+  const sandbox = loadDetect(makeDocument());
+
+  const candidate = sandbox.extractProfileCandidate(card);
+
+  assert.equal(candidate.name, 'Amy Chen');
+  assert.equal(candidate.title, 'Data Engineer');
+  assert.equal(candidate.url, 'https://www.linkedin.com/in/amy-chen/');
+  assert.equal(candidate.card, card);
+});
+
+test('findShowMoreResultsButton requires exact visible text and enabled state', () => {
+  const disabled = makeElement({
+    disabled: true,
+    textContent: 'Show more results',
+  });
+  const wrong = makeElement({ textContent: 'Show more jobs' });
+  const right = makeElement({ textContent: ' Show more results ' });
+  const sandbox = loadDetect(makeDocument({
+    querySelectorAllMap: {
+      'button, [role="button"]': [disabled, wrong, right],
+    },
+  }));
+
+  assert.equal(sandbox.findShowMoreResultsButton(), right);
+});
+
+test('loadAdditionalPeople clicks Show more results at most twice in sequence', async () => {
+  const first = makeElement({ textContent: 'Show more results' });
+  const second = makeElement({ textContent: 'Show more results' });
+  const buttons = [first, second];
+  const sandbox = loadDetect(makeDocument());
+  sandbox.findShowMoreResultsButton = () => buttons.shift() || null;
+  sandbox.getProfileUrlSet = () => new Set();
+  sandbox.waitForAdditionalProfileCards = async () => true;
+  sandbox.updateAutoSelectStatus = () => {};
+
+  const attempts = await sandbox.loadAdditionalPeople();
+
+  assert.equal(attempts, 2);
+  assert.equal(first.clicked, true);
+  assert.equal(second.clicked, true);
+});
 
 test('Connect to All asks the background worker to automate the selected profile', () => {
   const profileUrl = 'https://www.linkedin.com/in/yoojin-lim/';

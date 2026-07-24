@@ -14,12 +14,16 @@ let showFloatingPanel = true; // Set this to true to enable floating panel
 const INVITE_MESSAGE_SOURCE = 'linkedin-invite-extension';
 const ADD_NOTE_INITIAL_RETRIES = 60;
 const BATCH_PROFILE_TIMEOUT_MS = 60000;
+const AUTO_SELECT_TARGET = 10;
+const AUTO_SELECT_MAX_LOADS = 2;
+const AUTO_SELECT_LOAD_TIMEOUT_MS = 5000;
 let activeAddNoteRequest = null;
 let activeBatchAutomationRequestId = null;
 let activeBatchAutomationSourceTabId = null;
 let activeBatchProfileRequest = null;
 let nextAddNoteRequestId = 1;
 let nextBatchRequestId = 1;
+let autoSelectRunning = false;
 
 function notifyBatchController(status, reason = '') {
   if (!activeBatchAutomationRequestId) {
@@ -273,6 +277,101 @@ function isCurrentProfileInviteHref(href) {
 
   const vanityMatch = href.match(/[?&]vanityName=([^&#]+)/);
   return vanityMatch ? decodeURIComponent(vanityMatch[1]) === currentSlug : true;
+}
+
+function getProfileCards() {
+  return Array.from(document.querySelectorAll(
+    'li.org-people-profile-card__profile-card-spacing'
+  ));
+}
+
+function extractProfileCandidate(card) {
+  const link = card.querySelector(
+    'a[data-test-app-aware-link][href*="/in/"], a[href*="/in/"]'
+  );
+  const nameElement = card.querySelector('.artdeco-entity-lockup__title');
+  const titleElement = card.querySelector(
+    '.artdeco-entity-lockup__subtitle, .org-people-profile-card__profile-title'
+  );
+  const url = link && (link.href || link.getAttribute('href'));
+  const name = nameElement && nameElement.textContent.trim();
+  if (!url || !name) return null;
+
+  return {
+    name,
+    title: titleElement ? titleElement.textContent.trim() : '',
+    url,
+    card
+  };
+}
+
+function getProfileUrlSet() {
+  return new Set(
+    getProfileCards()
+      .map(extractProfileCandidate)
+      .filter(Boolean)
+      .map((candidate) => candidate.url)
+  );
+}
+
+function findShowMoreResultsButton() {
+  return Array.from(document.querySelectorAll('button, [role="button"]'))
+    .find((element) => {
+      const text = (element.textContent || '').replace(/\s+/g, ' ').trim();
+      const label = (element.getAttribute('aria-label') || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      return !element.disabled &&
+        element.getAttribute('aria-disabled') !== 'true' &&
+        (text === 'Show more results' || label === 'Show more results');
+    }) || null;
+}
+
+function waitForAdditionalProfileCards(
+  previousUrls,
+  timeoutMs = AUTO_SELECT_LOAD_TIMEOUT_MS
+) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timeoutId = null;
+    const hasNewProfile = () => {
+      for (const url of getProfileUrlSet()) {
+        if (!previousUrls.has(url)) return true;
+      }
+      return false;
+    };
+    const finish = (didLoad) => {
+      if (settled) return;
+      settled = true;
+      observer.disconnect();
+      clearTimeout(timeoutId);
+      resolve(didLoad);
+    };
+    const observer = new MutationObserver(() => {
+      if (hasNewProfile()) finish(true);
+    });
+
+    observer.observe(document.body, { childList: true, subtree: true });
+    timeoutId = setTimeout(() => finish(hasNewProfile()), timeoutMs);
+    if (hasNewProfile()) finish(true);
+  });
+}
+
+async function loadAdditionalPeople() {
+  let attempts = 0;
+  while (attempts < AUTO_SELECT_MAX_LOADS) {
+    const button = findShowMoreResultsButton();
+    if (!button) break;
+    updateAutoSelectStatus(
+      `Loading people ${attempts + 1}/${AUTO_SELECT_MAX_LOADS}…`
+    );
+    const previousUrls = getProfileUrlSet();
+    button.click();
+    attempts += 1;
+    const didLoad = await waitForAdditionalProfileCards(previousUrls);
+    if (!didLoad) break;
+  }
+  return attempts;
 }
 
 // Function to create "Select" buttons on profile cards
