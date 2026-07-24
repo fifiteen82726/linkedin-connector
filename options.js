@@ -1,7 +1,7 @@
 // Default settings
 const DEFAULT_SETTINGS = {
   myName: 'Alan',
-  myRole: 'Software Engineer',
+  myRole: 'Sr. Data Engineer',
   myCompany: 'Google',
   targetRole: 'data',
   messageTemplate: `Hi {{firstName}},
@@ -46,4 +46,4 @@ document.getElementById('saveSettings').addEventListener('click', function() {
       status.style.display = 'none';
     }, 3000);
   });
-}); 
+});

@@ -11,10 +11,108 @@ let selectedProfiles = [];
 // Add this at the top of the file with other state variables
 let showFloatingPanel = true; // Set this to true to enable floating panel
 
+const INVITE_MESSAGE_SOURCE = 'linkedin-invite-extension';
+const ADD_NOTE_INITIAL_RETRIES = 60;
+const BATCH_PROFILE_TIMEOUT_MS = 60000;
+let activeAddNoteRequest = null;
+let activeBatchAutomationRequestId = null;
+let activeBatchAutomationSourceTabId = null;
+let activeBatchProfileRequest = null;
+let nextAddNoteRequestId = 1;
+let nextBatchRequestId = 1;
+
+function notifyBatchController(status, reason = '') {
+  if (!activeBatchAutomationRequestId) {
+    return false;
+  }
+
+  const requestId = activeBatchAutomationRequestId;
+  const sourceTabId = activeBatchAutomationSourceTabId;
+  activeBatchAutomationRequestId = null;
+  activeBatchAutomationSourceTabId = null;
+  chrome.runtime.sendMessage({
+    source: INVITE_MESSAGE_SOURCE,
+    action: 'batchProfileResult',
+    requestId,
+    sourceTabId,
+    profileUrl: window.location.href,
+    status,
+    reason
+  });
+  return true;
+}
+
+function getDiagnosticContext() {
+  return {
+    frameRole: window === window.top ? 'top' : 'child',
+    url: window.location.href,
+    readyState: document.readyState || 'unknown',
+    visibilityState: document.visibilityState || 'unknown'
+  };
+}
+
+function logDiagnostic(event, details = {}) {
+  console.log('[LinkedIn Invite]', {
+    event,
+    ...getDiagnosticContext(),
+    ...details
+  });
+}
+
+function summarizeElement(element) {
+  return {
+    tagName: element.tagName || '',
+    text: (element.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 120),
+    ariaLabel: element.getAttribute && element.getAttribute('aria-label') || '',
+    id: element.id || '',
+    disabled: Boolean(element.disabled)
+  };
+}
+
+function getAddNoteAttempt(retriesRemaining) {
+  return ADD_NOTE_INITIAL_RETRIES - retriesRemaining + 1;
+}
+
+function logAddNoteScan(retriesRemaining) {
+  const shouldIncludeSnapshot = retriesRemaining === ADD_NOTE_INITIAL_RETRIES ||
+    retriesRemaining % 5 === 0;
+  if (!shouldIncludeSnapshot) return;
+
+  const searchRoots = getAccessibleRoots();
+  const countAcrossRoots = (selector) => searchRoots.reduce((count, root) => {
+    try {
+      return count + root.querySelectorAll(selector).length;
+    } catch (e) {
+      return count;
+    }
+  }, 0);
+  const details = {
+    attempt: getAddNoteAttempt(retriesRemaining),
+    retriesRemaining,
+    modalOutletCount: countAcrossRoots('#artdeco-modal-outlet'),
+    dialogCount: countAcrossRoots('[data-test-modal-id="send-invite-modal"]'),
+    modalCount: countAcrossRoots('[data-test-modal]'),
+    addNoteButtonCount: countAcrossRoots('button[aria-label="Add a note"]'),
+    accessibleDocumentCount: getAccessibleDocuments().length,
+    searchRootCount: searchRoots.length,
+    shadowRootCount: searchRoots.filter((root) => root.host).length,
+    iframeCount: document.querySelectorAll('iframe').length,
+    activeElement: document.activeElement ? summarizeElement(document.activeElement) : null
+  };
+
+  if (retriesRemaining === 0) {
+    details.buttonSamples = Array.from(document.querySelectorAll('button'))
+      .slice(0, 20)
+      .map(summarizeElement);
+  }
+
+  logDiagnostic('ADD_NOTE_SCAN', details);
+}
+
 // Default settings and initialization
 const DEFAULT_SETTINGS = {
   myName: 'Sunny',
-  myRole: 'Data Analyst Engineer',
+  myRole: 'Sr. Data Engineer',
   myCompany: 'American Airlines',
   targetRole: 'Data',
   messageTemplate: `Hi {{firstName}},
@@ -32,8 +130,16 @@ chrome.storage.sync.get(DEFAULT_SETTINGS, function(items) {
   Object.assign(userSettings, items);
 });
 
+logDiagnostic('SCRIPT_INIT', {
+  referrer: document.referrer || ''
+});
+
 // Listen for keydown events
 document.addEventListener('keydown', function(event) {
+  if (window !== window.top) {
+    return;
+  }
+
   // Log all key events for debugging
   console.log('Key Event:', {
     key: event.key,
@@ -55,7 +161,7 @@ document.addEventListener('keydown', function(event) {
   // Check for hotkey combinations
   // We'll check both direct key state and event properties
   const isModifierPressed = altKeyPressed || event.altKey || event.metaKey;
-  
+
   if (isModifierPressed) {
     let handled = true;
 
@@ -93,6 +199,7 @@ document.addEventListener('keydown', function(event) {
     if (handled) {
       event.preventDefault();
       event.stopPropagation();
+      return;
     }
   }
 
@@ -151,6 +258,21 @@ window.addEventListener('blur', function() {
 // Function to determine if we're on a company people page
 function isCompanyPeoplePage() {
   return window.location.href.includes('/company/') && window.location.href.includes('/people/');
+}
+
+function getCurrentProfileSlug() {
+  const match = window.location.href.match(/\/in\/([^/?#]+)/);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+function isCurrentProfileInviteHref(href) {
+  const currentSlug = getCurrentProfileSlug();
+  if (!currentSlug || !href.includes('/preload/custom-invite/')) {
+    return true;
+  }
+
+  const vanityMatch = href.match(/[?&]vanityName=([^&#]+)/);
+  return vanityMatch ? decodeURIComponent(vanityMatch[1]) === currentSlug : true;
 }
 
 // Function to create "Select" buttons on profile cards
@@ -442,17 +564,136 @@ function updateFloatingPanel() {
   });
 }
 
+function broadcastInviteModalCommand(shouldSend, profileName) {
+  const command = {
+    source: INVITE_MESSAGE_SOURCE,
+    action: 'handleInviteModal',
+    shouldSend,
+    profileName
+  };
+  let recipients = 0;
+  const frames = Array.from(document.querySelectorAll('iframe'));
+
+  for (const [frameIndex, frame] of frames.entries()) {
+    const frameSource = frame.src || frame.getAttribute('src') || '';
+    const hasContentWindow = Boolean(frame.contentWindow);
+    let contentDocumentAccessible = false;
+
+    try {
+      contentDocumentAccessible = Boolean(frame.contentDocument);
+    } catch (e) {
+      // Cross-origin frames cannot expose their document to the parent.
+    }
+
+    try {
+      const frameUrl = new URL(frameSource, window.location.href);
+      const isLinkedInFrame = frameUrl.hostname === 'linkedin.com' ||
+        frameUrl.hostname.endsWith('.linkedin.com');
+
+      logDiagnostic('FRAME_DISCOVERY', {
+        frameIndex,
+        source: frameSource,
+        origin: frameUrl.origin,
+        isLinkedInFrame,
+        hasContentWindow,
+        contentDocumentAccessible
+      });
+
+      if (!isLinkedInFrame) {
+        logDiagnostic('FRAME_MESSAGE_SKIPPED', {
+          frameIndex,
+          source: frameSource,
+          reason: 'not-linkedin-frame'
+        });
+        continue;
+      }
+
+      if (!hasContentWindow) {
+        logDiagnostic('FRAME_MESSAGE_SKIPPED', {
+          frameIndex,
+          source: frameSource,
+          reason: 'missing-content-window'
+        });
+        continue;
+      }
+
+      frame.contentWindow.postMessage(command, frameUrl.origin);
+      recipients += 1;
+      logDiagnostic('FRAME_MESSAGE_SENT', {
+        frameIndex,
+        source: frameSource,
+        origin: frameUrl.origin,
+        action: command.action
+      });
+    } catch (e) {
+      logDiagnostic('FRAME_MESSAGE_ERROR', {
+        frameIndex,
+        source: frameSource,
+        errorName: e && e.name || 'Error',
+        errorMessage: e && e.message || String(e)
+      });
+    }
+  }
+
+  logDiagnostic('INVITE_DELEGATED', {
+    frameCount: frames.length,
+    recipients
+  });
+
+  return recipients;
+}
+
 // Listen for messages from other tabs
 window.addEventListener('message', function(event) {
-  console.log('%c RECEIVED MESSAGE FROM PARENT TAB', 'background: #8e44ad; color: #ffffff; font-size: 12px; font-weight: bold;', event.data);
-  
-  if (event.data && event.data.action === 'autoConnect') {
-    console.log('%c EXECUTING AUTO-CONNECT FROM MESSAGE', 'background: #8e44ad; color: #ffffff; font-size: 14px; font-weight: bold;');
-    // Add a slight delay to ensure the page is fully loaded
-    setTimeout(() => {
-      automateLinkedInConnect(event.data.shouldSend);
-    }, 2000);
+  const isInviteModalMessage = event.data &&
+    event.data.source === INVITE_MESSAGE_SOURCE &&
+    event.data.action === 'handleInviteModal';
+
+  if (isInviteModalMessage) {
+    logDiagnostic('FRAME_MESSAGE_RECEIVED', {
+      origin: event.origin || '',
+      sourceIsParent: event.source === window.parent,
+      action: event.data.action
+    });
   }
+
+  if (window !== window.top &&
+      event.source === window.parent &&
+      isInviteModalMessage) {
+    console.log('%c HANDLING INVITE MODAL IN CHILD FRAME', 'background: #8e44ad; color: #ffffff; font-size: 12px; font-weight: bold;');
+    handleAddNote(
+      event.data.shouldSend,
+      ADD_NOTE_INITIAL_RETRIES,
+      event.data.profileName
+    );
+    return;
+  }
+  
+});
+
+chrome.runtime.onMessage.addListener(function(message, sender, sendResponse) {
+  if (window !== window.top ||
+      !message ||
+      message.source !== INVITE_MESSAGE_SOURCE) {
+    return false;
+  }
+
+  if (message.action === 'autoConnect') {
+    activeBatchAutomationRequestId = message.requestId;
+    activeBatchAutomationSourceTabId = message.sourceTabId;
+    console.log('%c EXECUTING AUTO-CONNECT FROM BACKGROUND', 'background: #8e44ad; color: #ffffff; font-size: 14px; font-weight: bold;');
+    sendResponse({ accepted: true });
+    setTimeout(() => {
+      automateLinkedInConnect(message.shouldSend);
+    }, 2000);
+    return false;
+  }
+
+  if (message.action === 'batchProfileResult') {
+    finishActiveBatchProfile(message.requestId, message.status, message.reason || '');
+  }
+
+  return false;
 });
 
 // Connect to all selected profiles
@@ -478,7 +719,28 @@ function connectToAllSelected() {
   processNextProfile(0);
 }
 
-// Process profiles sequentially
+function finishActiveBatchProfile(requestId, status, reason = '') {
+  if (!activeBatchProfileRequest ||
+      activeBatchProfileRequest.requestId !== requestId) {
+    return false;
+  }
+
+  const request = activeBatchProfileRequest;
+  activeBatchProfileRequest = null;
+  clearTimeout(request.timeoutId);
+  request.profile.status = ['completed', 'failed', 'timeout'].includes(status)
+    ? status
+    : 'failed';
+  updateFloatingPanel();
+
+  if (reason) {
+    console.log('Batch profile result:', reason);
+  }
+  setTimeout(() => processNextProfile(request.index + 1), 1000);
+  return true;
+}
+
+// Process profiles sequentially through the extension background worker.
 function processNextProfile(index) {
   if (index >= selectedProfiles.length) {
     console.log('%c FINISHED CONNECTING TO ALL PROFILES', 'background: #4CAF50; color: #ffffff; font-size: 14px; font-weight: bold;');
@@ -492,129 +754,39 @@ function processNextProfile(index) {
   profile.status = 'processing';
   updateFloatingPanel();
   
-  // Open the profile in a new tab
-  const profileTab = window.open(profile.url, '_blank');
-  
-  if (!profileTab) {
-    console.log('%c FAILED TO OPEN NEW TAB - POPUP BLOCKER?', 'background: #e74c3c; color: #ffffff; font-size: 14px; font-weight: bold;');
-    alert('Failed to open profile in new tab. Please check your popup blocker settings.');
-    profile.status = 'failed';
-    updateFloatingPanel();
-    // Try next profile
-    setTimeout(() => processNextProfile(index + 1), 1000);
-    return;
-  }
-  
-  console.log('%c NEW TAB OPENED, WAITING FOR PAGE LOAD', 'background: #3498db; color: #ffffff; font-size: 12px; font-weight: bold;');
-  
-  // Set a timeout to handle cases where the tab process hangs
-  const timeoutId = setTimeout(() => {
+  const requestId = `batch-${Date.now()}-${nextBatchRequestId}`;
+  nextBatchRequestId += 1;
+  activeBatchProfileRequest = {
+    index,
+    profile,
+    requestId,
+    timeoutId: null
+  };
+  activeBatchProfileRequest.timeoutId = setTimeout(() => {
     console.log('%c CONNECTION TIMEOUT FOR: ' + profile.name, 'background: #e74c3c; color: #ffffff; font-size: 14px; font-weight: bold;');
-    profile.status = 'timeout';
-    updateFloatingPanel();
-    
-    try { profileTab.close(); } catch (e) { /* ignore */ }
-    processNextProfile(index + 1);
-  }, 25000); // 25 second timeout
-  
-  // Create a content script to inject into the new tab
-  const script = `
-    // Listen for messages from parent window
-    window.addEventListener('message', function(event) {
-      console.log("Child tab received message:", event.data);
-      if (event.data && event.data.action === 'autoConnect') {
-        // Try to find the main window's automateLinkedInConnect function
-        if (typeof automateLinkedInConnect === 'function') {
-          console.log("Executing automateLinkedInConnect in child tab");
-          automateLinkedInConnect(event.data.shouldSend);
-        } else {
-          console.log("automateLinkedInConnect function not found in child tab");
-        }
-      }
-    });
-    
-    // Tell parent we're ready
-    window.opener.postMessage({ action: 'tabReady' }, '*');
-    console.log("Child tab sent ready message");
-  `;
-  
-  // Listen for connection complete message
-  window.addEventListener('message', function connectionListener(event) {
-    if (event.data && event.data.action === 'connectionComplete' && event.data.profileUrl === profile.url) {
-      console.log('%c RECEIVED CONNECTION COMPLETE MESSAGE FOR: ' + profile.name, 'background: #4CAF50; color: #ffffff; font-size: 14px; font-weight: bold;');
-      
-      clearTimeout(timeoutId);
-      profile.status = 'completed';
-      updateFloatingPanel();
-      
-      // Remove this listener
-      window.removeEventListener('message', connectionListener);
+    finishActiveBatchProfile(requestId, 'timeout');
+  }, BATCH_PROFILE_TIMEOUT_MS);
+
+  chrome.runtime.sendMessage({
+    source: INVITE_MESSAGE_SOURCE,
+    action: 'openBatchProfile',
+    requestId,
+    profileUrl: profile.url,
+    shouldSend: true
+  }, (response) => {
+    if (!activeBatchProfileRequest ||
+        activeBatchProfileRequest.requestId !== requestId) {
+      return;
+    }
+
+    if (chrome.runtime.lastError || !response || !response.accepted) {
+      const reason = chrome.runtime.lastError
+        ? chrome.runtime.lastError.message
+        : response && response.error || 'Background worker rejected the profile';
+      console.log('%c FAILED TO START PROFILE AUTOMATION: ' + reason, 'background: #e74c3c; color: #ffffff; font-size: 12px;');
+      finishActiveBatchProfile(requestId, 'failed', reason);
     }
   });
-  
-  // Wait for tab to load
-  setTimeout(() => {
-    try {
-      // Try to inject our listener script 
-      profileTab.postMessage({ 
-        action: 'autoConnect', 
-        shouldSend: true,
-        profileUrl: profile.url 
-      }, '*');
-      console.log('%c SENT CONNECT MESSAGE TO NEW TAB', 'background: #3498db; color: #ffffff; font-size: 12px; font-weight: bold;');
-      
-      // Also try to execute directly if we can
-      try {
-        profileTab.eval(`
-          console.log("Direct execution in new tab");
-          setTimeout(() => {
-            if (typeof automateLinkedInConnect === 'function') {
-              automateLinkedInConnect(true);
-              
-              // Notify parent window when complete
-              setTimeout(() => {
-                window.opener.postMessage({ 
-                  action: 'connectionComplete',
-                  profileUrl: '${profile.url}'
-                }, '*');
-              }, 2000);
-            } else {
-              console.log("Function not available via eval");
-            }
-          }, 2000);
-        `);
-      } catch (evalErr) {
-        console.log('Eval execution failed:', evalErr);
-      }
-      
-      // Move to the next profile after a longer delay to ensure completion
-      setTimeout(() => {
-        clearTimeout(timeoutId);
-        
-        // If status is still processing, mark as completed
-        if (profile.status === 'processing') {
-          profile.status = 'completed';
-          updateFloatingPanel();
-        }
-        
-        try { profileTab.close(); } catch (e) { /* ignore */ }
-        processNextProfile(index + 1);
-      }, 10000); // Increased to 10 seconds
-    } catch (err) {
-      console.log('%c ERROR COMMUNICATING WITH TAB:', 'background: #e74c3c; color: #ffffff; font-size: 12px;', err);
-      clearTimeout(timeoutId);
-      
-      // Mark as failed
-      profile.status = 'failed';
-      updateFloatingPanel();
-      
-      // Still try to proceed to next profile
-      setTimeout(() => {
-        try { profileTab.close(); } catch (e) { /* ignore */ }
-        processNextProfile(index + 1);
-      }, 1000);
-    }
-  }, 3000); // 3 second delay to ensure page is loaded
 }
 
 // Function to automate LinkedIn connection
@@ -625,13 +797,14 @@ function automateLinkedInConnect(shouldSend = true) {
   const name = findProfileName();
   if (!name) {
     console.log('%c NO PROFILE NAME FOUND', 'background: #FFC107; color: #000000; font-size: 16px; font-weight: bold;');
+    notifyBatchController('failed', 'profile-name-not-found');
     return;
   }
   
   console.log('%c PROFILE NAME: ' + name, 'background: #4CAF50; color: #ffffff; font-size: 16px; font-weight: bold;');
   
   // Step 1: Find and click the Connect button in main profile
-  findAndClickConnect(shouldSend);
+  findAndClickConnect(shouldSend, name);
 }
 
 // Check if on company people page and initialize UI
@@ -666,10 +839,23 @@ const observer = new MutationObserver(function(mutations) {
   if (shouldAddButtons) {
     addSelectButtonsToProfiles();
   }
+
+  observeLinkedInShadowRoots(observer);
+
+  if (activeAddNoteRequest) {
+    const addNoteButton = findAddNoteButton();
+    if (addNoteButton) {
+      logDiagnostic('ADD_NOTE_MUTATION_MATCH', {
+        requestId: activeAddNoteRequest.id
+      });
+      completeAddNoteRequest(addNoteButton, activeAddNoteRequest.id);
+    }
+  }
 });
 
 // Start observing the document
 observer.observe(document.body, { childList: true, subtree: true });
+observeLinkedInShadowRoots(observer);
 
 // Function to find profile name using multiple methods
 function findProfileName() {
@@ -693,26 +879,44 @@ function findProfileName() {
   
   // Method 2: Get from page title (fallback)
   const title = document.title;
-  const titleMatch = title.match(/\([0-9]+\)\s*([^|]+)\s*\|/);
+  const titleMatch = title.match(/^(?:\([0-9]+\)\s*)?([^|]+)\s*\|/);
   if (titleMatch && titleMatch[1]) {
     console.log("Found name from page title");
     return titleMatch[1].trim();
   }
   
-  // Method 3: Get any h1 with short text (last resort)
-  const h1Elements = document.querySelectorAll('h1');
-  for (const h1 of h1Elements) {
-    const text = h1.textContent.trim();
+  // Method 3: New LinkedIn profile header uses an h2 inside the profile link.
+  const currentProfileMatch = window.location.href.match(/\/in\/([^/?#]+)/);
+  const currentProfileSlug = currentProfileMatch ? currentProfileMatch[1] : null;
+  const profileLinks = document.querySelectorAll('a[href*="/in/"]');
+  for (const link of profileLinks) {
+    const href = link.href || link.getAttribute('href') || '';
+    if (currentProfileSlug && !href.includes(`/in/${currentProfileSlug}`)) {
+      continue;
+    }
+
+    const heading = link.querySelector('h1, h2') || link.querySelector('h1') || link.querySelector('h2');
+    const text = heading ? heading.textContent.trim() : '';
+    if (text && text.split(' ').length <= 5) {
+      console.log("Found name from profile link heading");
+      return text;
+    }
+  }
+
+  // Method 4: Get any h1 or h2 with short text (last resort)
+  const headingElements = document.querySelectorAll('h1, h2');
+  for (const heading of headingElements) {
+    const text = heading.textContent.trim();
     if (text && text.split(' ').length <= 5) { // Likely a name
-      console.log("Found name from h1 element");
+      console.log("Found name from heading element");
       return text;
     }
   }
   
-  // Method 4: Debug - print all h1 contents to console
-  console.log("DEBUG - All h1 elements on page:");
-  document.querySelectorAll('h1').forEach((el, i) => {
-    console.log(`h1 #${i}:`, el.textContent.trim());
+  // Method 5: Debug - print all h1/h2 contents to console
+  console.log("DEBUG - All h1/h2 elements on page:");
+  document.querySelectorAll('h1, h2').forEach((el, i) => {
+    console.log(`heading #${i}:`, el.textContent.trim());
   });
   
   // Nothing found
@@ -741,8 +945,8 @@ function findConnectButton() {
   }
   
   if (!mainProfile) {
-    console.log("Main profile container not found");
-    return null;
+    console.log("Main profile container not found - falling back to document search");
+    mainProfile = document;
   }
   
   // Method 1: Look specifically for the primary connect button in the main profile
@@ -775,8 +979,30 @@ function findConnectButton() {
     console.log("Found connect button by aria-label in main profile");
     return button;
   }
+
+  // Method 3: New LinkedIn layouts render the primary Connect action as a styled link.
+  const connectLinks = mainProfile.querySelectorAll('a[aria-label*="connect" i], a[aria-label*="invite" i], a[href*="/preload/custom-invite/"]');
+  for (const link of connectLinks) {
+    const label = link.getAttribute('aria-label') || '';
+    const href = link.href || link.getAttribute('href') || '';
+    const text = link.textContent.trim();
+
+    if (!isCurrentProfileInviteHref(href)) {
+      console.log("Skipping Connect link for another profile");
+      continue;
+    }
+
+    if ((label.includes('connect') || label.includes('Invite') || href.includes('/preload/custom-invite/') || text.includes('Connect')) &&
+        !label.includes('Remove') &&
+        !label.includes('Cancel') &&
+        !link.closest('li.xZBbbHTmMdEiOVSJfbHsnkxeORHQLUI') &&
+        !link.closest('li.pv-browsemap-section__member-container')) {
+      console.log("Found connect link in main profile");
+      return link;
+    }
+  }
   
-  // Method 3: Look for buttons with SVG connect-small icon in main profile
+  // Method 4: Look for buttons with SVG connect-small icon in main profile
   const allButtons = mainProfile.querySelectorAll('button');
   for (const button of allButtons) {
     const hasConnectIcon = button.querySelector('use[href="#connect-small"]');
@@ -797,8 +1023,12 @@ function findConnectButton() {
   return null;
 }
 
+function startInviteModalFlow(shouldSend, profileName) {
+  handleAddNote(shouldSend, ADD_NOTE_INITIAL_RETRIES, profileName);
+}
+
 // Function to find and click Connect in main profile
-function findAndClickConnect(shouldSend = true) {
+function findAndClickConnect(shouldSend = true, profileName = null) {
   console.log("Looking for Connect button in main profile...");
   
   // Find direct Connect button in main profile
@@ -823,7 +1053,7 @@ function findAndClickConnect(shouldSend = true) {
     console.log("Connect button clicked");
     
     // Wait for the modal and continue with Add note
-    setTimeout(() => handleAddNote(shouldSend), 1000);
+    setTimeout(() => startInviteModalFlow(shouldSend, profileName), 1000);
     return;
   }
   
@@ -843,13 +1073,15 @@ function findAndClickConnect(shouldSend = true) {
         connectOption.click();
         
         // Wait for the modal and continue with Add note
-        setTimeout(() => handleAddNote(shouldSend), 1000);
+        setTimeout(() => startInviteModalFlow(shouldSend, profileName), 1000);
       } else {
         console.log("Connect option not found in dropdown");
+        notifyBatchController('failed', 'connect-option-not-found');
       }
     }, 1000);
   } else {
     console.log("More button not found");
+    notifyBatchController('failed', 'connect-control-not-found');
   }
 }
 
@@ -911,38 +1143,85 @@ function findConnectInDropdown() {
 }
 
 // Function to handle the Add Note flow
-function handleAddNote(shouldSend = true) {
-  const addNoteButton = findAddNoteButton();
-  if (!addNoteButton) {
-    console.log('%c ADD NOTE BUTTON NOT FOUND', 'background: #FFC107; color: #000000; font-size: 16px; font-weight: bold;');
-    
-    // Try the More path again as a fallback
-    console.log('Retrying with More button path...');
-    // Check if any modal is open and close it first
-    const closeButtons = document.querySelectorAll('button[aria-label="Dismiss"], button.artdeco-modal__dismiss');
-    if (closeButtons.length > 0) {
-      console.log('Closing open modal before retrying...');
-      closeButtons[0].click();
-      // Give it a moment to close
-      setTimeout(() => findAndClickConnect(shouldSend), 500);
-    } else {
-      // Just retry directly
-      findAndClickConnect(shouldSend);
-    }
+function completeAddNoteRequest(addNoteButton, requestId) {
+  if (!activeAddNoteRequest || activeAddNoteRequest.id !== requestId) {
     return;
   }
-  
-  console.log('Clicking Add a note button...');
+
+  const request = activeAddNoteRequest;
+  activeAddNoteRequest = null;
+  logDiagnostic('ADD_NOTE_CLICK', {
+    requestId,
+    button: summarizeElement(addNoteButton)
+  });
   addNoteButton.click();
-  
-  // Step 3: Wait for the textarea to appear and fill it with the name
+
   setTimeout(() => {
-    fillCustomMessage(shouldSend);
+    fillCustomMessage(request.shouldSend, request.profileName);
   }, 500);
 }
 
+function handleAddNote(
+  shouldSend = true,
+  retriesRemaining = ADD_NOTE_INITIAL_RETRIES,
+  profileName = null,
+  requestId = null
+) {
+  if (requestId === null) {
+    const replacedRequestId = activeAddNoteRequest && activeAddNoteRequest.id;
+    requestId = nextAddNoteRequestId;
+    nextAddNoteRequestId += 1;
+    activeAddNoteRequest = {
+      id: requestId,
+      shouldSend,
+      profileName
+    };
+    logDiagnostic('ADD_NOTE_REQUEST_STARTED', {
+      requestId,
+      replacedRequestId: replacedRequestId || null
+    });
+  }
+
+  if (!activeAddNoteRequest || activeAddNoteRequest.id !== requestId) {
+    return;
+  }
+
+  logAddNoteScan(retriesRemaining);
+  const addNoteButton = findAddNoteButton();
+  if (!addNoteButton) {
+    if (window === window.top && retriesRemaining === ADD_NOTE_INITIAL_RETRIES) {
+      const delegatedFrames = broadcastInviteModalCommand(shouldSend, profileName);
+      if (delegatedFrames > 0) {
+        console.log('Invite modal handling also delegated to child frame');
+      }
+    }
+
+    if (retriesRemaining > 0) {
+      logDiagnostic('ADD_NOTE_WAIT', {
+        requestId,
+        attempt: getAddNoteAttempt(retriesRemaining),
+        retriesRemaining
+      });
+      setTimeout(() => handleAddNote(
+        shouldSend,
+        retriesRemaining - 1,
+        profileName,
+        requestId
+      ), 250);
+      return;
+    }
+
+    activeAddNoteRequest = null;
+    console.log('%c ADD NOTE BUTTON NOT FOUND', 'background: #FFC107; color: #000000; font-size: 16px; font-weight: bold;');
+    notifyBatchController('failed', 'add-note-button-not-found');
+    return;
+  }
+
+  completeAddNoteRequest(addNoteButton, requestId);
+}
+
 // Function to fill the custom message - update to notify parent window
-function fillCustomMessage(shouldSend = true) {
+function fillCustomMessage(shouldSend = true, profileName = null) {
   // Different selectors for the textarea
   const textareaSelectors = [
     'textarea#custom-message',
@@ -952,31 +1231,29 @@ function fillCustomMessage(shouldSend = true) {
   ];
   
   let textarea = null;
-  for (const selector of textareaSelectors) {
-    textarea = document.querySelector(selector);
+  for (const searchDocument of getAccessibleRoots()) {
+    for (const selector of textareaSelectors) {
+      textarea = searchDocument.querySelector(selector);
+      if (textarea) break;
+    }
     if (textarea) break;
   }
   
   if (!textarea) {
     console.log('%c TEXTAREA NOT FOUND', 'background: #FFC107; color: #000000; font-size: 16px; font-weight: bold;');
-    // Try to notify the parent window
-    try {
-      window.opener && window.opener.postMessage({ 
-        action: 'connectionFailed',
-        profileUrl: window.location.href
-      }, '*');
-    } catch (e) { /* ignore */ }
+    notifyBatchController('failed', 'textarea-not-found');
     return;
   }
   
   // Check if settings need to be initialized
   if (!userSettings.hasInitializedSettings) {
     showSettingsDialog();
+    notifyBatchController('failed', 'settings-not-initialized');
     return;
   }
   
   // Use settings from chrome.storage
-  const name = findProfileName();
+  const name = profileName || findProfileName();
   const firstName = getFirstName(name);
   
   // Use saved message template or default if somehow missing
@@ -1012,13 +1289,16 @@ function fillCustomMessage(shouldSend = true) {
       ];
 
       let sendButton = null;
-      for (const selector of sendButtonSelectors) {
-        const buttons = document.querySelectorAll(selector);
-        for (const button of buttons) {
-          if (button.textContent.trim() === 'Send') {
-            sendButton = button;
-            break;
+      for (const searchDocument of getAccessibleRoots()) {
+        for (const selector of sendButtonSelectors) {
+          const buttons = searchDocument.querySelectorAll(selector);
+          for (const button of buttons) {
+            if (button.textContent.trim() === 'Send') {
+              sendButton = button;
+              break;
+            }
           }
+          if (sendButton) break;
         }
         if (sendButton) break;
       }
@@ -1028,13 +1308,7 @@ function fillCustomMessage(shouldSend = true) {
         sendButton.click();
         console.log('%c CONNECTION REQUEST SENT!', 'background: #4CAF50; color: #ffffff; font-size: 16px; font-weight: bold;');
         
-        // Notify the parent window that connection is complete
-        try {
-          window.opener && window.opener.postMessage({ 
-            action: 'connectionComplete',
-            profileUrl: window.location.href
-          }, '*');
-        } catch (e) { /* ignore */ }
+        notifyBatchController('completed');
         
         // Wait a brief moment to ensure the send action is completed, then close the tab
         setTimeout(() => {
@@ -1044,17 +1318,81 @@ function fillCustomMessage(shouldSend = true) {
       } else {
         console.log('%c SEND BUTTON NOT FOUND', 'background: #FFC107; color: #000000; font-size: 16px; font-weight: bold;');
         
-        // Notify the parent window that connection failed
-        try {
-          window.opener && window.opener.postMessage({ 
-            action: 'connectionFailed',
-            profileUrl: window.location.href
-          }, '*');
-        } catch (e) { /* ignore */ }
+        notifyBatchController('failed', 'send-button-not-found');
       }
     }, 500);
   } else {
     console.log('%c MESSAGE FILLED (NOT SENDING)', 'background: #4CAF50; color: #ffffff; font-size: 16px; font-weight: bold;');
+  }
+}
+
+function getAccessibleDocuments(rootDocument = document) {
+  const documents = [rootDocument];
+  const visited = new Set(documents);
+
+  for (const currentDocument of documents) {
+    let frames = [];
+    try {
+      frames = currentDocument.querySelectorAll('iframe');
+    } catch (e) {
+      continue;
+    }
+
+    for (const frame of frames) {
+      try {
+        const frameDocument = frame.contentDocument;
+        if (frameDocument && !visited.has(frameDocument)) {
+          visited.add(frameDocument);
+          documents.push(frameDocument);
+        }
+      } catch (e) {
+        // Cross-origin frames cannot be inspected.
+      }
+    }
+  }
+
+  return documents;
+}
+
+function getAccessibleRoots(rootDocument = document) {
+  const roots = getAccessibleDocuments(rootDocument);
+  const visited = new Set(roots);
+
+  for (const currentRoot of roots) {
+    let shadowHosts = [];
+    try {
+      shadowHosts = currentRoot.querySelectorAll(
+        '#interop-outlet, [data-testid="interop-shadowdom"]'
+      );
+    } catch (e) {
+      continue;
+    }
+
+    for (const host of shadowHosts) {
+      if (host.shadowRoot && !visited.has(host.shadowRoot)) {
+        visited.add(host.shadowRoot);
+        roots.push(host.shadowRoot);
+      }
+    }
+  }
+
+  return roots;
+}
+
+const observedLinkedInShadowRoots = new WeakSet();
+
+function observeLinkedInShadowRoots(mutationObserver) {
+  for (const root of getAccessibleRoots()) {
+    if (!root.host || observedLinkedInShadowRoots.has(root)) {
+      continue;
+    }
+
+    observedLinkedInShadowRoots.add(root);
+    mutationObserver.observe(root, { childList: true, subtree: true });
+    logDiagnostic('SHADOW_ROOT_OBSERVED', {
+      hostId: root.host.id || '',
+      hostTestId: root.host.getAttribute('data-testid') || ''
+    });
   }
 }
 
@@ -1068,27 +1406,42 @@ function findAddNoteButton() {
     'button[aria-label="Add a note"]'
   ];
   
-  for (const selector of addNoteSelectors) {
-    try {
-      const buttons = document.querySelectorAll(selector);
-      for (const button of buttons) {
-        if (button.textContent.includes('Add a note')) {
-          return button;
+  const searchDocuments = getAccessibleRoots();
+  for (const [documentIndex, searchDocument] of searchDocuments.entries()) {
+    for (const selector of addNoteSelectors) {
+      try {
+        const buttons = searchDocument.querySelectorAll(selector);
+        for (const button of buttons) {
+          if (button.textContent.includes('Add a note')) {
+            logDiagnostic('ADD_NOTE_FOUND', {
+              documentIndex,
+              selector,
+              button: summarizeElement(button)
+            });
+            return button;
+          }
         }
+      } catch (e) {
+        // Skip invalid selectors
       }
-    } catch (e) {
-      // Skip invalid selectors
     }
   }
-  
+
   // Fallback: find by text content
-  const allButtons = document.querySelectorAll('button');
-  for (const button of allButtons) {
-    if (button.textContent.trim() === 'Add a note') {
-      return button;
+  for (const [documentIndex, searchDocument] of searchDocuments.entries()) {
+    const allButtons = searchDocument.querySelectorAll('button');
+    for (const button of allButtons) {
+      if (button.textContent.trim() === 'Add a note') {
+        logDiagnostic('ADD_NOTE_FOUND', {
+          documentIndex,
+          selector: 'button (text fallback)',
+          button: summarizeElement(button)
+        });
+        return button;
+      }
     }
   }
-  
+
   return null;
 }
 

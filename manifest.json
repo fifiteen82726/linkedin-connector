@@ -4,8 +4,12 @@
   "version": "1.0",
   "description": "Linkedin Invite Automation",
   "permissions": [
-    "storage"
+    "storage",
+    "tabs"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "action": {
     "default_popup": "options.html",
     "default_icon": {
@@ -17,8 +21,9 @@
   "options_page": "options.html",
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["detect.js"]
+      "matches": ["https://*.linkedin.com/*"],
+      "js": ["detect.js"],
+      "all_frames": true
     }
   ],
   "icons": {
@@ -26,4 +31,4 @@
     "48": "icon48.png",
     "128": "icon128.png"
   }
-} 
+}
