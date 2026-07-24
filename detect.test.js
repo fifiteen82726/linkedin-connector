@@ -36,6 +36,8 @@ function makeElement({
   attributes = {},
   classNames = [],
   disabled = false,
+  hidden = false,
+  visible = true,
   textContent = '',
   href = '',
   src = '',
@@ -54,6 +56,7 @@ function makeElement({
     href,
     src,
     disabled,
+    hidden,
     contentDocument,
     contentWindow,
     shadowRoot,
@@ -99,6 +102,9 @@ function makeElement({
       if (name === 'href') return href;
       if (name === 'src') return src;
       return attributes[name] ?? null;
+    },
+    getClientRects() {
+      return visible && !hidden ? [{}] : [];
     },
     setAttribute(name, value) {
       attributes[name] = String(value);
@@ -279,6 +285,10 @@ test('extractProfileCandidate reads name, title, and profile URL', () => {
 });
 
 test('findShowMoreResultsButton requires exact visible text and enabled state', () => {
+  const hidden = makeElement({
+    textContent: 'Show more results',
+    visible: false,
+  });
   const disabled = makeElement({
     disabled: true,
     textContent: 'Show more results',
@@ -287,7 +297,7 @@ test('findShowMoreResultsButton requires exact visible text and enabled state', 
   const right = makeElement({ textContent: ' Show more results ' });
   const sandbox = loadDetect(makeDocument({
     querySelectorAllMap: {
-      'button, [role="button"]': [disabled, wrong, right],
+      'button, [role="button"]': [hidden, disabled, wrong, right],
     },
   }));
 
@@ -309,6 +319,81 @@ test('loadAdditionalPeople clicks Show more results at most twice in sequence', 
   assert.equal(attempts, 2);
   assert.equal(first.clicked, true);
   assert.equal(second.clicked, true);
+});
+
+test('waitForAdditionalProfileCards resolves when the card count grows', async () => {
+  const cards = [
+    makeProfileCard({
+      name: 'Amy Chen',
+      title: 'Designer',
+      url: '/in/amy',
+    }),
+  ];
+  const timers = [];
+  const sandbox = loadDetect(
+    makeDocument({
+      querySelectorAllMap: {
+        'li.org-people-profile-card__profile-card-spacing': cards,
+      },
+    }),
+    undefined,
+    {
+      setTimeout(callback) {
+        timers.push(callback);
+        return timers.length;
+      },
+    },
+  );
+  const snapshot = sandbox.getProfileSnapshot();
+
+  const waiting = sandbox.waitForAdditionalProfileCards(snapshot);
+  cards.push(makeElement());
+  sandbox.__mutationObservers.at(-1).callback();
+
+  assert.equal(await waiting, true);
+});
+
+test('waitForShowMoreResultsButtonReady waits for a disabled button to recover', async () => {
+  const button = makeElement({
+    disabled: true,
+    textContent: 'Show more results',
+  });
+  const timers = [];
+  const sandbox = loadDetect(
+    makeDocument({
+      querySelectorAllMap: {
+        'button, [role="button"]': [button],
+      },
+    }),
+    undefined,
+    {
+      setTimeout(callback) {
+        timers.push(callback);
+        return timers.length;
+      },
+    },
+  );
+
+  const waiting = sandbox.waitForShowMoreResultsButtonReady();
+  button.disabled = false;
+  sandbox.__mutationObservers.at(-1).callback();
+
+  assert.equal(await waiting, button);
+});
+
+test('waitForShowMoreResultsButtonReady returns null after its bounded timeout', async () => {
+  const timers = [];
+  const sandbox = loadDetect(makeDocument(), undefined, {
+    setTimeout(callback) {
+      timers.push(callback);
+      return timers.length;
+    },
+  });
+
+  const waiting = sandbox.waitForShowMoreResultsButtonReady();
+  timers.at(-1)();
+
+  assert.equal(await waiting, null);
 });
 
 test('autoSelectProfiles preserves existing profiles and fills to ten by priority', async () => {
@@ -369,6 +454,57 @@ test('autoSelectProfiles reports fewer than ten and does not run concurrently', 
   releaseLoading(0);
   await first;
   assert.equal(sandbox.__status, 'Only found 0/10 matching profiles');
+});
+
+test('autoSelectProfiles skips loading and reports target completion when overfilled', async () => {
+  const sandbox = loadDetect(
+    makeDocument(),
+    'https://www.linkedin.com/company/acme/people/',
+  );
+  const existing = Array.from({ length: 12 }, (_, index) => ({
+    name: `Existing ${index}`,
+    url: `/in/existing-${index}`,
+    status: 'pending',
+  }));
+  let loadCalls = 0;
+  vm.runInContext(`selectedProfiles = ${JSON.stringify(existing)}`, sandbox);
+  sandbox.loadAdditionalPeople = async () => {
+    loadCalls += 1;
+  };
+  sandbox.updateAutoSelectStatus = (message) => {
+    sandbox.__status = message;
+  };
+
+  assert.equal(await sandbox.autoSelectProfiles(), true);
+  assert.equal(loadCalls, 0);
+  assert.equal(sandbox.__status, 'Selected 10/10 profiles');
+  assert.equal(vm.runInContext('selectedProfiles.length', sandbox), 12);
+});
+
+test('autoSelectProfiles restores its button and preserves selections after an error', async () => {
+  const sandbox = loadDetect(
+    makeDocument(),
+    'https://www.linkedin.com/company/acme/people/',
+  );
+  vm.runInContext(
+    "selectedProfiles = [{ name: 'Amy Chen', url: '/in/amy', status: 'pending' }]",
+    sandbox,
+  );
+  const runningStates = [];
+  sandbox.loadAdditionalPeople = async () => {
+    throw new Error('LinkedIn changed');
+  };
+  sandbox.setAutoSelectButtonRunning = (isRunning) => {
+    runningStates.push(isRunning);
+  };
+  sandbox.updateAutoSelectStatus = (message) => {
+    sandbox.__status = message;
+  };
+
+  assert.equal(await sandbox.autoSelectProfiles(), false);
+  assert.deepEqual(runningStates, [true, false]);
+  assert.equal(sandbox.__status, 'Auto-select failed: LinkedIn changed');
+  assert.equal(vm.runInContext('selectedProfiles.length', sandbox), 1);
 });
 
 test('Connect to All asks the background worker to automate the selected profile', () => {

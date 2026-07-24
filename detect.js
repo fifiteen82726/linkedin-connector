@@ -17,6 +17,7 @@ const BATCH_PROFILE_TIMEOUT_MS = 60000;
 const AUTO_SELECT_TARGET = 10;
 const AUTO_SELECT_MAX_LOADS = 2;
 const AUTO_SELECT_LOAD_TIMEOUT_MS = 5000;
+const AUTO_SELECT_CONTROL_TIMEOUT_MS = 2000;
 let activeAddNoteRequest = null;
 let activeBatchAutomationRequestId = null;
 let activeBatchAutomationSourceTabId = null;
@@ -314,29 +315,89 @@ function getProfileUrlSet() {
   );
 }
 
+function getProfileSnapshot() {
+  return {
+    count: getProfileCards().length,
+    urls: getProfileUrlSet()
+  };
+}
+
+function isElementVisible(element) {
+  if (!element ||
+      element.hidden ||
+      element.getAttribute('aria-hidden') === 'true') {
+    return false;
+  }
+  if (typeof element.getClientRects === 'function') {
+    return element.getClientRects().length > 0;
+  }
+  return true;
+}
+
+function isShowMoreResultsControl(element) {
+  if (!isElementVisible(element)) return false;
+  const text = (element.textContent || '').replace(/\s+/g, ' ').trim();
+  const label = (element.getAttribute('aria-label') || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text === 'Show more results' || label === 'Show more results';
+}
+
+function isControlEnabled(element) {
+  return !element.disabled &&
+    element.getAttribute('aria-disabled') !== 'true';
+}
+
 function findShowMoreResultsButton() {
   return Array.from(document.querySelectorAll('button, [role="button"]'))
-    .find((element) => {
-      const text = (element.textContent || '').replace(/\s+/g, ' ').trim();
-      const label = (element.getAttribute('aria-label') || '')
-        .replace(/\s+/g, ' ')
-        .trim();
-      return !element.disabled &&
-        element.getAttribute('aria-disabled') !== 'true' &&
-        (text === 'Show more results' || label === 'Show more results');
-    }) || null;
+    .find((element) => (
+      isShowMoreResultsControl(element) && isControlEnabled(element)
+    )) || null;
+}
+
+function waitForShowMoreResultsButtonReady(
+  timeoutMs = AUTO_SELECT_CONTROL_TIMEOUT_MS
+) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timeoutId = null;
+    const finish = (button) => {
+      if (settled) return;
+      settled = true;
+      observer.disconnect();
+      clearTimeout(timeoutId);
+      resolve(button);
+    };
+    const check = () => {
+      const button = findShowMoreResultsButton();
+      if (button) finish(button);
+    };
+    const observer = new MutationObserver(check);
+
+    observer.observe(document.body, {
+      attributes: true,
+      childList: true,
+      subtree: true,
+      attributeFilter: ['aria-disabled', 'class', 'disabled', 'hidden']
+    });
+    timeoutId = setTimeout(() => finish(null), timeoutMs);
+    check();
+  });
 }
 
 function waitForAdditionalProfileCards(
-  previousUrls,
+  previousSnapshot,
   timeoutMs = AUTO_SELECT_LOAD_TIMEOUT_MS
 ) {
   return new Promise((resolve) => {
     let settled = false;
     let timeoutId = null;
-    const hasNewProfile = () => {
+    const hasAdditionalProfile = () => {
+      if (getProfileCards().length > previousSnapshot.count) {
+        return true;
+      }
       for (const url of getProfileUrlSet()) {
-        if (!previousUrls.has(url)) return true;
+        if (!previousSnapshot.urls.has(url)) return true;
       }
       return false;
     };
@@ -348,27 +409,27 @@ function waitForAdditionalProfileCards(
       resolve(didLoad);
     };
     const observer = new MutationObserver(() => {
-      if (hasNewProfile()) finish(true);
+      if (hasAdditionalProfile()) finish(true);
     });
 
     observer.observe(document.body, { childList: true, subtree: true });
-    timeoutId = setTimeout(() => finish(hasNewProfile()), timeoutMs);
-    if (hasNewProfile()) finish(true);
+    timeoutId = setTimeout(() => finish(hasAdditionalProfile()), timeoutMs);
+    if (hasAdditionalProfile()) finish(true);
   });
 }
 
 async function loadAdditionalPeople() {
   let attempts = 0;
   while (attempts < AUTO_SELECT_MAX_LOADS) {
-    const button = findShowMoreResultsButton();
+    const button = await waitForShowMoreResultsButtonReady();
     if (!button) break;
     updateAutoSelectStatus(
       `Loading people ${attempts + 1}/${AUTO_SELECT_MAX_LOADS}…`
     );
-    const previousUrls = getProfileUrlSet();
+    const previousSnapshot = getProfileSnapshot();
     button.click();
     attempts += 1;
-    const didLoad = await waitForAdditionalProfileCards(previousUrls);
+    const didLoad = await waitForAdditionalProfileCards(previousSnapshot);
     if (!didLoad) break;
   }
   return attempts;
@@ -405,7 +466,7 @@ async function autoSelectProfiles() {
   if (autoSelectRunning) return false;
   if (selectedProfiles.length >= AUTO_SELECT_TARGET) {
     updateAutoSelectStatus(
-      `Selected ${selectedProfiles.length}/${AUTO_SELECT_TARGET} profiles`
+      `Selected ${AUTO_SELECT_TARGET}/${AUTO_SELECT_TARGET} profiles`
     );
     return true;
   }
