@@ -1259,6 +1259,33 @@ test('the parent frame ignores LinkedIn frames that are not invite frames', () =
   assert.equal(postedMessages.length, 0);
 });
 
+test('the top frame does not report failure after delegating invite handling', () => {
+  const postedMessages = [];
+  const frame = makeElement({
+    src: 'https://www.linkedin.com/preload/?_bprMode=vanilla',
+    contentWindow: {
+      postMessage(message) {
+        postedMessages.push(message);
+      },
+    },
+  });
+  const document = makeDocument({
+    querySelectorAllMap: {
+      iframe: [frame],
+    },
+  });
+  const sandbox = loadDetect(document);
+  vm.runInContext(
+    "activeBatchAutomationRequestId = 'batch-1'; activeBatchAutomationSourceTabId = 7",
+    sandbox,
+  );
+
+  sandbox.handleAddNote(true, 0, 'Yoojin L.');
+
+  assert.equal(postedMessages.length, 1);
+  assert.equal(sandbox.__runtimeMessages.length, 0);
+});
+
 test('the top frame keeps polling after delegating to a child frame', () => {
   const timers = [];
   const postedMessages = [];

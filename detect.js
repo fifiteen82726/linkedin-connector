@@ -1447,7 +1447,8 @@ function handleAddNote(
     activeAddNoteRequest = {
       id: requestId,
       shouldSend,
-      profileName
+      profileName,
+      delegatedToInviteFrame: false
     };
     logDiagnostic('ADD_NOTE_REQUEST_STARTED', {
       requestId,
@@ -1465,6 +1466,7 @@ function handleAddNote(
     if (window === window.top) {
       const delegatedFrames = broadcastInviteModalCommand(shouldSend, profileName);
       if (delegatedFrames > 0) {
+        activeAddNoteRequest.delegatedToInviteFrame = true;
         console.log('Invite modal handling also delegated to child frame');
       }
     }
@@ -1484,7 +1486,15 @@ function handleAddNote(
       return;
     }
 
+    const delegatedToInviteFrame =
+      window === window.top &&
+      activeAddNoteRequest.delegatedToInviteFrame;
     activeAddNoteRequest = null;
+    if (delegatedToInviteFrame) {
+      logDiagnostic('ADD_NOTE_DELEGATED_TIMEOUT', { requestId });
+      return;
+    }
+
     console.log('%c ADD NOTE BUTTON NOT FOUND', 'background: #FFC107; color: #000000; font-size: 16px; font-weight: bold;');
     notifyBatchController('failed', 'add-note-button-not-found');
     return;
