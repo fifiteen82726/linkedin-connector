@@ -179,10 +179,16 @@ document.addEventListener('keydown', function(event) {
         showSettingsDialog();
         break;
       case 'KeyE':
+        if (!event.altKey) {
+          handled = false;
+          break;
+        }
         console.log('%c HOTKEY "Option+E" DETECTED! (Open Reply Templates)', 'background: #ff0000; color: #ffffff; font-size: 16px; font-weight: bold;');
-        Promise.resolve(ReplyTemplates.showDialog()).catch((error) => {
-          console.error('Failed to open reply templates:', error);
-        });
+        Promise.resolve()
+          .then(() => ReplyTemplates.showDialog())
+          .catch((error) => {
+            console.error('Failed to open reply templates:', error);
+          });
         break;
       case 'KeyO':
         showFloatingPanel = !showFloatingPanel; // Toggle the floating panel

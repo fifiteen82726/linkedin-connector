@@ -1041,7 +1041,7 @@ test('Alt+W does not start profile automation inside a child frame', () => {
   assert.equal(calls, 0);
 });
 
-test('Option+E opens reply templates once and handles the event in the top frame', () => {
+test('Option+E opens reply templates once and handles the event in the top frame', async () => {
   const listeners = {};
   const document = makeDocument({ listeners });
   let calls = 0;
@@ -1072,10 +1072,49 @@ test('Option+E opens reply templates once and handles the event in the top frame
     },
     which: 69,
   });
+  await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(calls, 1);
   assert.equal(prevented, 1);
   assert.equal(stopped, 1);
+});
+
+test('Command+E does not open reply templates or handle the event', async () => {
+  const listeners = {};
+  const document = makeDocument({ listeners });
+  let calls = 0;
+  let prevented = 0;
+  let stopped = 0;
+  loadDetect(document, undefined, {
+    replyTemplates: {
+      showDialog() {
+        calls += 1;
+        return Promise.resolve();
+      },
+    },
+  });
+
+  listeners.keydown({
+    altKey: false,
+    code: 'KeyE',
+    ctrlKey: false,
+    key: 'e',
+    keyCode: 69,
+    location: 0,
+    metaKey: true,
+    preventDefault() {
+      prevented += 1;
+    },
+    stopPropagation() {
+      stopped += 1;
+    },
+    which: 69,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(calls, 0);
+  assert.equal(prevented, 0);
+  assert.equal(stopped, 0);
 });
 
 test('Option+E does not open reply templates inside a child frame', () => {
@@ -1154,4 +1193,39 @@ test('Option+E logs showDialog rejections without an unhandled rejection', async
   } finally {
     process.removeListener('unhandledRejection', onUnhandledRejection);
   }
+});
+
+test('Option+E catches and logs synchronous showDialog errors', async () => {
+  const listeners = {};
+  const document = makeDocument({ listeners });
+  const errors = [];
+  const dialogError = new Error('dialog failed synchronously');
+  loadDetect(document, undefined, {
+    errors,
+    replyTemplates: {
+      showDialog() {
+        throw dialogError;
+      },
+    },
+  });
+
+  assert.doesNotThrow(() => {
+    listeners.keydown({
+      altKey: true,
+      code: 'KeyE',
+      ctrlKey: false,
+      key: 'e',
+      keyCode: 69,
+      location: 0,
+      metaKey: false,
+      preventDefault() {},
+      stopPropagation() {},
+      which: 69,
+    });
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(errors.length, 1);
+  assert.match(errors[0][0], /Failed to open reply templates/);
+  assert.equal(errors[0][1], dialogError);
 });
