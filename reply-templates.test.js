@@ -38,6 +38,17 @@ class FakeElement {
     return false;
   }
 
+  get isHidden() {
+    let current = this;
+    while (current) {
+      if (current.hidden) {
+        return true;
+      }
+      current = current.parentNode;
+    }
+    return false;
+  }
+
   append(...children) {
     for (const child of children) {
       this.appendChild(child);
@@ -113,6 +124,9 @@ class FakeElement {
   }
 
   focus() {
+    if (this.isHidden) {
+      return;
+    }
     this.focusCount += 1;
     this.ownerDocument.activeElement = this;
   }
@@ -505,16 +519,26 @@ test('add reports persistence errors without reloading, rendering, or closing', 
   ]);
 });
 
-test('add reports reload errors without rendering or closing', async () => {
+test('add treats persistence as success when the template reload fails', async () => {
   const events = [];
+  const createdTemplate = sampleTemplate({
+    id: 'custom-1',
+    title: 'Title',
+    body: 'Body',
+    kind: 'custom',
+  });
   const { api } = loadReplyTemplates();
   const actions = api.createActions({
     clipboard: {},
     close() {
-      assert.fail('failed add reload must not close the modal');
+      assert.fail('partial add success must not close the modal');
     },
-    render() {
-      events.push(['render']);
+    render(templates, options) {
+      events.push([
+        'render',
+        Array.from(templates),
+        options && options.append,
+      ]);
     },
     setStatus(...status) {
       events.push(['status', ...status]);
@@ -522,6 +546,7 @@ test('add reports reload errors without rendering or closing', async () => {
     store: {
       async addCustomTemplate() {
         events.push(['add']);
+        return createdTemplate;
       },
       async getTemplates() {
         events.push(['get']);
@@ -530,11 +555,16 @@ test('add reports reload errors without rendering or closing', async () => {
     },
   });
 
-  assert.equal(await actions.add('Title', 'Body'), false);
+  assert.equal(await actions.add('Title', 'Body'), true);
   assert.deepEqual(events, [
     ['add'],
     ['get'],
-    ['status', 'Could not reload templates', 'error'],
+    ['render', [createdTemplate], true],
+    [
+      'status',
+      'Template added, but the template list could not be refreshed',
+      'warning',
+    ],
   ]);
 });
 
@@ -629,6 +659,24 @@ test('showDialog builds an accessible modal and safely renders template text', a
     backdrop.querySelector('h3').textContent,
     '<img src=x onerror=alert(1)>',
   );
+  const copyButtons = templateList.querySelectorAll('button')
+    .filter(({ textContent }) => textContent === 'Copy');
+  const saveButtons = templateList.querySelectorAll('button')
+    .filter(({ textContent }) => textContent === 'Save');
+  assert.deepEqual(
+    copyButtons.map((button) => button.getAttribute('aria-label')),
+    [
+      'Copy <img src=x onerror=alert(1)>',
+      'Copy Custom reply',
+    ],
+  );
+  assert.deepEqual(
+    saveButtons.map((button) => button.getAttribute('aria-label')),
+    [
+      'Save <img src=x onerror=alert(1)>',
+      'Save Custom reply',
+    ],
+  );
   assert.equal(backdrop.querySelectorAll('script').length, 0);
   assert.doesNotMatch(readRequiredFile(SCRIPT_PATH), /\binnerHTML\b/);
 });
@@ -658,6 +706,80 @@ test('showDialog focuses the first template textarea after initial render', asyn
     .querySelector('textarea');
   assert.equal(firstTextarea.focusCount, 1);
   assert.equal(doc.activeElement, firstTextarea);
+});
+
+test('closing the modal restores focus to the element active before opening', async () => {
+  const doc = new FakeDocument();
+  const opener = doc.createElement('button');
+  doc.body.append(opener);
+  opener.focus();
+  const store = {
+    async getTemplates() {
+      return [sampleTemplate()];
+    },
+  };
+  const { api } = loadReplyTemplates({ doc, store });
+  const backdrop = api.showDialog({ doc, store });
+  await settle();
+  assert.notEqual(doc.activeElement, opener);
+
+  await findByText(backdrop, 'button', 'Copy').emit('click');
+
+  assert.equal(backdrop.isConnected, false);
+  assert.equal(doc.activeElement, opener);
+  assert.equal(opener.focusCount, 2);
+});
+
+test('Tab and Shift+Tab wrap focus within the modal', async () => {
+  const doc = new FakeDocument();
+  const store = {
+    async getTemplates() {
+      return [sampleTemplate()];
+    },
+  };
+  const { api } = loadReplyTemplates({ doc, store });
+  const backdrop = api.showDialog({ doc, store });
+  await settle();
+  const closeButton = backdrop.querySelector(
+    '[aria-label="Close reply templates"]',
+  );
+  const addTemplateButton = findByText(
+    backdrop,
+    'button',
+    'Add template',
+  );
+
+  addTemplateButton.focus();
+  const forwardEvent = await doc.emit('keydown', {
+    key: 'Tab',
+    shiftKey: false,
+  });
+  assert.equal(forwardEvent.defaultPrevented, true);
+  assert.equal(doc.activeElement, closeButton);
+
+  const backwardEvent = await doc.emit('keydown', {
+    key: 'Tab',
+    shiftKey: true,
+  });
+  assert.equal(backwardEvent.defaultPrevented, true);
+  assert.equal(doc.activeElement, addTemplateButton);
+});
+
+test('an empty template list focuses the Add template control', async () => {
+  const doc = new FakeDocument();
+  const store = {
+    async getTemplates() {
+      return [];
+    },
+  };
+  const { api } = loadReplyTemplates({ doc, store });
+  const backdrop = api.showDialog({ doc, store });
+  await settle();
+
+  assert.equal(
+    doc.activeElement,
+    findByText(backdrop, 'button', 'Add template'),
+  );
 });
 
 test('template Save and Copy use current textarea values', async () => {
@@ -819,6 +941,10 @@ test('initial template load errors are reported without throwing', async () => {
   const status = backdrop.querySelector('[role="status"]');
   assert.equal(status.textContent, 'Storage read failed');
   assert.ok(status.className.includes('reply-template-status--error'));
+  assert.equal(
+    doc.activeElement,
+    findByText(backdrop, 'button', 'Add template'),
+  );
   assert.ok(backdrop.isConnected);
 });
 
@@ -857,6 +983,12 @@ test('the add form cancels cleanly and resets only after a successful add', asyn
   const bodyInput = form.querySelector('textarea');
   const cancelButton = findByText(form, 'button', 'Cancel');
   const submitButton = findByText(form, 'button', 'Add');
+  let formHiddenWhenRevealFocused = null;
+  const focusRevealButton = revealButton.focus.bind(revealButton);
+  revealButton.focus = () => {
+    formHiddenWhenRevealFocused = form.hidden;
+    focusRevealButton();
+  };
 
   assert.equal(form.hidden, true);
   await revealButton.emit('click');
@@ -870,9 +1002,12 @@ test('the add form cancels cleanly and resets only after a successful add', asyn
   await cancelButton.emit('click');
   assert.equal(form.hidden, true);
   assert.equal(revealButton.hidden, false);
+  assert.equal(formHiddenWhenRevealFocused, false);
+  assert.equal(doc.activeElement, revealButton);
   assert.equal(nameInput.value, '');
   assert.equal(bodyInput.value, '');
 
+  formHiddenWhenRevealFocused = null;
   await revealButton.emit('click');
   nameInput.value = 'New template';
   bodyInput.value = 'New body';
@@ -890,6 +1025,8 @@ test('the add form cancels cleanly and resets only after a successful add', asyn
   assert.equal(submitButton.disabled, false);
   assert.equal(form.hidden, true);
   assert.equal(revealButton.hidden, false);
+  assert.equal(formHiddenWhenRevealFocused, false);
+  assert.equal(doc.activeElement, revealButton);
   assert.equal(nameInput.value, '');
   assert.equal(bodyInput.value, '');
   assert.equal(backdrop.querySelectorAll('.reply-template-item').length, 2);
@@ -898,6 +1035,118 @@ test('the add form cancels cleanly and resets only after a successful add', asyn
     'Template added',
   );
   assert.ok(backdrop.isConnected);
+});
+
+test('a successful add preserves unsaved existing template drafts', async () => {
+  const doc = new FakeDocument();
+  const createdTemplate = sampleTemplate({
+    id: 'custom-1',
+    title: 'New template',
+    body: 'New body',
+    kind: 'custom',
+  });
+  let getCalls = 0;
+  const store = {
+    async addCustomTemplate() {
+      return createdTemplate;
+    },
+    async getTemplates() {
+      getCalls += 1;
+      return getCalls === 1
+        ? [sampleTemplate()]
+        : [sampleTemplate(), createdTemplate];
+    },
+  };
+  const { api } = loadReplyTemplates({ doc, store });
+  const backdrop = api.showDialog({ doc, store });
+  await settle();
+  const existingTextarea = backdrop
+    .querySelector('.reply-template-list')
+    .querySelector('textarea');
+  existingTextarea.value = 'Unsaved existing draft';
+  const revealButton = findByText(backdrop, 'button', 'Add template');
+  await revealButton.emit('click');
+  const form = backdrop.querySelector('form');
+  form.querySelector('input').value = 'New template';
+  form.querySelector('textarea').value = 'New body';
+
+  await form.emit('submit');
+
+  assert.equal(
+    backdrop.querySelectorAll('.reply-template-item').length,
+    2,
+  );
+  assert.deepEqual(
+    backdrop
+      .querySelector('.reply-template-list')
+      .querySelectorAll('textarea')
+      .map(({ value }) => value),
+    ['Unsaved existing draft', 'New body'],
+  );
+  assert.equal(
+    backdrop.querySelector('[role="status"]').textContent,
+    'Template added',
+  );
+});
+
+test('a persisted add with a failed refresh clears the form without duplicating', async () => {
+  const doc = new FakeDocument();
+  const createdTemplate = sampleTemplate({
+    id: 'custom-1',
+    title: 'New template',
+    body: 'New body',
+    kind: 'custom',
+  });
+  let addCalls = 0;
+  let getCalls = 0;
+  const store = {
+    async addCustomTemplate() {
+      addCalls += 1;
+      return createdTemplate;
+    },
+    async getTemplates() {
+      getCalls += 1;
+      if (getCalls === 1) {
+        return [sampleTemplate()];
+      }
+      throw new Error('Refresh failed');
+    },
+  };
+  const { api } = loadReplyTemplates({ doc, store });
+  const backdrop = api.showDialog({ doc, store });
+  await settle();
+  backdrop.querySelector('.reply-template-list').querySelector(
+    'textarea',
+  ).value = 'Unsaved existing draft';
+  const revealButton = findByText(backdrop, 'button', 'Add template');
+  await revealButton.emit('click');
+  const form = backdrop.querySelector('form');
+  const nameInput = form.querySelector('input');
+  const bodyInput = form.querySelector('textarea');
+  nameInput.value = 'New template';
+  bodyInput.value = 'New body';
+
+  await form.emit('submit');
+
+  assert.equal(addCalls, 1);
+  assert.equal(getCalls, 2);
+  assert.equal(form.hidden, true);
+  assert.equal(revealButton.hidden, false);
+  assert.equal(nameInput.value, '');
+  assert.equal(bodyInput.value, '');
+  assert.deepEqual(
+    backdrop
+      .querySelector('.reply-template-list')
+      .querySelectorAll('textarea')
+      .map(({ value }) => value),
+    ['Unsaved existing draft', 'New body'],
+  );
+  const status = backdrop.querySelector('[role="status"]');
+  assert.equal(
+    status.textContent,
+    'Template added, but the template list could not be refreshed',
+  );
+  assert.ok(status.className.includes('reply-template-status--warning'));
 });
 
 test('a failed add keeps the inline form and its values available for retry', async () => {
@@ -940,11 +1189,24 @@ test('a failed add keeps the inline form and its values available for retry', as
 
 test('reply template styles stay scoped and include modal constraints', () => {
   const source = readRequiredFile(STYLE_PATH);
+  const modalRule = source.match(
+    /\.reply-template-modal\s*\{([^}]*)\}/,
+  )[1];
+  const listRule = source.match(
+    /\.reply-template-list\s*\{([^}]*)\}/,
+  )[1];
 
   assert.match(source, /\.reply-template-backdrop\s*\{/);
   assert.match(source, /\.reply-template-modal\s*\{/);
   assert.match(source, /max-width:\s*720px/);
-  assert.match(source, /overflow-y:\s*auto/);
+  assert.match(modalRule, /max-height:\s*min\(88vh,\s*760px\)/);
+  assert.match(modalRule, /max-height:\s*min\(88dvh,\s*760px\)/);
+  assert.match(modalRule, /overflow-y:\s*auto/);
+  assert.doesNotMatch(modalRule, /overflow:\s*hidden/);
+  assert.match(listRule, /flex:\s*0 0 auto/);
+  assert.match(listRule, /overflow-y:\s*visible/);
+  assert.match(source, /max-height:\s*100dvh/);
+  assert.match(source, /\.reply-template-status--warning\s*\{/);
   assert.match(source, /resize:\s*vertical/);
   assert.match(source, /@media\s*\(/);
   assert.doesNotMatch(source, /(?:^|})\s*(?:body|html|button|textarea)\s*\{/m);

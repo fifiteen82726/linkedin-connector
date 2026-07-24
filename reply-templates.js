@@ -45,12 +45,9 @@
       },
 
       async add(title, body) {
+        let createdTemplate;
         try {
-          await store.addCustomTemplate(title, body);
-          const templates = await store.getTemplates();
-          render(templates);
-          setStatus('Template added', 'success');
-          return true;
+          createdTemplate = await store.addCustomTemplate(title, body);
         } catch (error) {
           setStatus(
             errorMessage(error, 'Could not add template'),
@@ -58,6 +55,19 @@
           );
           return false;
         }
+
+        try {
+          const templates = await store.getTemplates();
+          render(templates);
+          setStatus('Template added', 'success');
+        } catch (error) {
+          render([createdTemplate], { append: true });
+          setStatus(
+            'Template added, but the template list could not be refreshed',
+            'warning',
+          );
+        }
+        return true;
       },
     };
   }
@@ -93,6 +103,7 @@
       return existing;
     }
 
+    const previouslyFocused = doc.activeElement;
     const backdrop = createElement(
       doc,
       'div',
@@ -212,11 +223,71 @@
       closed = true;
       doc.removeEventListener('keydown', handleKeydown);
       backdrop.remove();
+      if (
+        previouslyFocused
+        && typeof previouslyFocused.focus === 'function'
+      ) {
+        previouslyFocused.focus();
+      }
+    }
+
+    function getFocusableElements() {
+      const focusableElements = [closeButton];
+      for (const {
+        copyButton,
+        saveButton,
+        textarea,
+      } of renderedTemplates.values()) {
+        focusableElements.push(textarea);
+        if (!copyButton.disabled) {
+          focusableElements.push(copyButton);
+        }
+        if (!saveButton.disabled) {
+          focusableElements.push(saveButton);
+        }
+      }
+
+      if (addForm.hidden) {
+        focusableElements.push(revealAddButton);
+      } else {
+        focusableElements.push(
+          nameInput,
+          bodyInput,
+          cancelAddButton,
+        );
+        if (!submitAddButton.disabled) {
+          focusableElements.push(submitAddButton);
+        }
+      }
+      return focusableElements;
     }
 
     function handleKeydown(event) {
       if (event.key === 'Escape') {
         close();
+        return;
+      }
+      if (event.key !== 'Tab') {
+        return;
+      }
+
+      const focusableElements = getFocusableElements();
+      if (!focusableElements.length) {
+        return;
+      }
+      const currentIndex = focusableElements.indexOf(doc.activeElement);
+      const shouldWrapBackward = event.shiftKey && currentIndex <= 0;
+      const shouldWrapForward = !event.shiftKey
+        && (
+          currentIndex === -1
+          || currentIndex === focusableElements.length - 1
+        );
+      if (shouldWrapBackward || shouldWrapForward) {
+        event.preventDefault();
+        const nextElement = shouldWrapBackward
+          ? focusableElements[focusableElements.length - 1]
+          : focusableElements[0];
+        nextElement.focus();
       }
     }
 
@@ -237,10 +308,34 @@
     }
 
     let actions;
+    let renderedTemplates = new Map();
 
-    function render(templates) {
+    function render(templates, { append = false } = {}) {
+      const drafts = new Map(
+        Array.from(
+          renderedTemplates,
+          ([id, { textarea }]) => [id, textarea.value],
+        ),
+      );
+      const templatesToRender = append
+        ? Array.from(
+          renderedTemplates.values(),
+          ({ template }) => template,
+        )
+        : [];
+      const renderedIds = new Set(
+        templatesToRender.map(({ id }) => id),
+      );
+      for (const template of templates) {
+        if (!renderedIds.has(template.id)) {
+          templatesToRender.push(template);
+          renderedIds.add(template.id);
+        }
+      }
+
       let firstTextarea = null;
-      const templateElements = templates.map((template, index) => {
+      const nextRenderedTemplates = new Map();
+      const templateElements = templatesToRender.map((template, index) => {
         const item = createElement(doc, 'section', 'reply-template-item');
         const itemTitleId = `${MODAL_ID}-template-${index}-title`;
         const itemTitle = createElement(
@@ -256,7 +351,9 @@
           'reply-template-textarea',
         );
         textarea.setAttribute('aria-labelledby', itemTitleId);
-        textarea.value = template.body;
+        textarea.value = drafts.has(template.id)
+          ? drafts.get(template.id)
+          : template.body;
         textarea.rows = 7;
         if (index === 0) {
           firstTextarea = textarea;
@@ -272,11 +369,13 @@
           'reply-template-button reply-template-button--primary',
           'Copy',
         );
+        copyButton.setAttribute('aria-label', `Copy ${template.title}`);
         const saveButton = createButton(
           doc,
           'reply-template-button reply-template-button--secondary',
           'Save',
         );
+        saveButton.setAttribute('aria-label', `Save ${template.title}`);
 
         runOnce(copyButton, () => actions.copy(textarea.value));
         runOnce(
@@ -285,10 +384,17 @@
         );
         itemActions.append(copyButton, saveButton);
         item.append(itemTitle, textarea, itemActions);
+        nextRenderedTemplates.set(template.id, {
+          copyButton,
+          saveButton,
+          template,
+          textarea,
+        });
         return item;
       });
 
       list.replaceChildren(...templateElements);
+      renderedTemplates = nextRenderedTemplates;
       return firstTextarea;
     }
 
@@ -303,8 +409,9 @@
     function resetAddForm() {
       nameInput.value = '';
       bodyInput.value = '';
-      addForm.hidden = true;
       revealAddButton.hidden = false;
+      revealAddButton.focus();
+      addForm.hidden = true;
     }
 
     revealAddButton.addEventListener('click', () => {
@@ -312,7 +419,9 @@
       addForm.hidden = false;
       nameInput.focus();
     });
-    cancelAddButton.addEventListener('click', resetAddForm);
+    cancelAddButton.addEventListener('click', () => {
+      resetAddForm();
+    });
     addForm.addEventListener('submit', async (event) => {
       event.preventDefault();
       if (submitAddButton.disabled) {
@@ -341,9 +450,7 @@
       .then((templates) => {
         if (!closed) {
           const firstTextarea = render(templates);
-          if (firstTextarea) {
-            firstTextarea.focus();
-          }
+          (firstTextarea || revealAddButton).focus();
         }
       })
       .catch((error) => {
@@ -352,6 +459,7 @@
             errorMessage(error, 'Could not load templates'),
             'error',
           );
+          revealAddButton.focus();
         }
       });
 
