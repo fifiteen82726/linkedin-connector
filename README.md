@@ -6,6 +6,7 @@ A browser extension that simplifies and automates the LinkedIn connection proces
 
 - **One-Click Automation**: Send personalized connection requests with a single keyboard shortcut
 - **Personalized Messages**: Automatically inserts the recipient's first name in your connection message
+- **Reply Templates**: Press `Option+E` (`Alt+E` on non-macOS keyboards) to edit, copy, save, and add reusable replies.
 - **Multiple Hotkey Options**:
   - `Alt+W`: Fill the message and automatically send the connection request
   - `Alt+Q`: Fill the message only (without sending, for review)
@@ -43,6 +44,17 @@ I'm Sunny, currently a Data Engineer at American Airlines. Impressed by your bac
 ```
 
 Replace the text with your own personalized message. The `${firstName}` variable will be automatically replaced with the recipient's first name.
+
+## Reply Templates
+
+Press `Option+E` on LinkedIn to open the reply-template modal.
+
+- Edit any textarea and click **Copy** to copy the current text and close the modal. This does not save the edit.
+- Click **Save** to persist an edited template for the next time the modal opens.
+- Click **Add template** to create a named custom template.
+- Close the modal with its close button or the `Escape` key. Unsaved edits are discarded.
+
+Reply templates are stored in `chrome.storage.local` and are not sent to an external service by this extension.
 
 ## Troubleshooting
 
