@@ -216,6 +216,16 @@
         : 'reply-template-status';
     }
 
+    function clearSavedStatus() {
+      if (
+        status.textContent === 'Saved'
+        && status.className
+          === 'reply-template-status reply-template-status--success'
+      ) {
+        setStatus('');
+      }
+    }
+
     function close() {
       if (closed) {
         return;
@@ -378,6 +388,7 @@
         );
         saveButton.setAttribute('aria-label', `Save ${template.title}`);
 
+        textarea.addEventListener('input', clearSavedStatus);
         runOnce(copyButton, () => actions.copy(textarea.value));
         runOnce(
           saveButton,

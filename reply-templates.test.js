@@ -834,6 +834,37 @@ test('template Save and Copy use current textarea values', async () => {
   assert.equal(doc.listenerCount('keydown'), 0);
 });
 
+test('editing a template after Save clears the stale Saved status', async () => {
+  const doc = new FakeDocument();
+  const store = {
+    async getTemplates() {
+      return [sampleTemplate()];
+    },
+    async saveBody() {},
+  };
+  const { api } = loadReplyTemplates({ doc, store });
+  const backdrop = api.showDialog({ doc, store });
+  await settle();
+  const textarea = backdrop.querySelector('textarea');
+  const saveButton = findByText(backdrop, 'button', 'Save');
+  const status = backdrop.querySelector('[role="status"]');
+
+  textarea.value = 'Saved body';
+  await saveButton.emit('click');
+
+  assert.equal(status.textContent, 'Saved');
+  assert.equal(
+    status.className,
+    'reply-template-status reply-template-status--success',
+  );
+
+  textarea.value = 'Later unsaved edit';
+  await textarea.emit('input');
+
+  assert.equal(status.textContent, '');
+  assert.equal(status.className, 'reply-template-status');
+});
+
 test('Save and Copy buttons ignore duplicate clicks while pending and recover', async () => {
   const doc = new FakeDocument();
   const save = deferred();
