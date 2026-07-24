@@ -254,16 +254,20 @@ function loadDetect(
   return sandbox;
 }
 
-function makeProfileCard({ name, title, url }) {
+function makeProfileCard({ action = 'Connect', name, title, url }) {
   const link = makeElement({ href: url });
   const nameElement = makeElement({ textContent: name });
   const titleElement = makeElement({ textContent: title });
+  const actionControl = makeElement({ textContent: action });
   return makeElement({
     querySelectorMap: {
       'a[data-test-app-aware-link][href*="/in/"], a[href*="/in/"]': link,
       '.artdeco-entity-lockup__title': nameElement,
       '.artdeco-entity-lockup__subtitle, .org-people-profile-card__profile-title':
         titleElement,
+    },
+    querySelectorAllMap: {
+      'button, a, [role="button"]': [actionControl],
     },
   });
 }
@@ -282,6 +286,23 @@ test('extractProfileCandidate reads name, title, and profile URL', () => {
   assert.equal(candidate.title, 'Data Engineer');
   assert.equal(candidate.url, 'https://www.linkedin.com/in/amy-chen/');
   assert.equal(candidate.card, card);
+  assert.equal(candidate.canConnect, true);
+});
+
+test('extractProfileCandidate only marks cards with a Connect action as connectable', () => {
+  const sandbox = loadDetect(makeDocument());
+  const actions = ['Connect', 'Pending', 'Follow', 'Message'];
+
+  const eligibility = actions.map((action) => sandbox.extractProfileCandidate(
+    makeProfileCard({
+      action,
+      name: `${action} Person`,
+      title: 'Data Engineer',
+      url: `/in/${action.toLowerCase()}`,
+    }),
+  ).canConnect);
+
+  assert.deepEqual(eligibility, [true, false, false, false]);
 });
 
 test('findShowMoreResultsButton requires exact visible text and enabled state', () => {
@@ -407,9 +428,24 @@ test('autoSelectProfiles preserves existing profiles and fills to ten by priorit
     status: 'pending',
   }));
   const candidates = [
-    { name: 'Jamie Robertson', title: 'Software Engineer', url: '/in/engineer' },
-    { name: 'Amy Chen', title: 'Designer', url: '/in/chen' },
-    { name: 'Chris Kim', title: 'Director of Data', url: '/in/director' },
+    {
+      name: 'Jamie Robertson',
+      title: 'Software Engineer',
+      url: '/in/engineer',
+      canConnect: true,
+    },
+    {
+      name: 'Amy Chen',
+      title: 'Designer',
+      url: '/in/chen',
+      canConnect: true,
+    },
+    {
+      name: 'Chris Kim',
+      title: 'Director of Data',
+      url: '/in/director',
+      canConnect: true,
+    },
   ];
   vm.runInContext(`selectedProfiles = ${JSON.stringify(existing)}`, sandbox);
   sandbox.loadAdditionalPeople = async () => 2;
@@ -429,6 +465,40 @@ test('autoSelectProfiles preserves existing profiles and fills to ten by priorit
   assert.equal(selected[8].url, '/in/chen');
   assert.equal(selected[9].url, '/in/engineer');
   assert.equal(sandbox.__status, 'Selected 10/10 profiles');
+});
+
+test('autoSelectProfiles excludes qualified profiles without a Connect action', async () => {
+  const sandbox = loadDetect(
+    makeDocument(),
+    'https://www.linkedin.com/company/acme/people/',
+  );
+  const candidates = [
+    {
+      name: 'Amy Chen',
+      title: 'Designer',
+      url: '/in/pending',
+      canConnect: false,
+    },
+    {
+      name: 'Jamie Robertson',
+      title: 'Software Engineer',
+      url: '/in/connect',
+      canConnect: true,
+    },
+  ];
+  sandbox.loadAdditionalPeople = async () => 0;
+  sandbox.getProfileCards = () => candidates;
+  sandbox.extractProfileCandidate = (candidate) => candidate;
+  sandbox.updateFloatingPanel = () => {};
+  sandbox.updateAutoSelectStatus = () => {};
+  sandbox.setAutoSelectButtonRunning = () => {};
+  sandbox.syncProfileSelectButton = () => {};
+
+  await sandbox.autoSelectProfiles();
+
+  const selected = vm.runInContext('selectedProfiles', sandbox);
+  assert.equal(selected.length, 1);
+  assert.equal(selected[0].url, '/in/connect');
 });
 
 test('autoSelectProfiles reports fewer than ten and does not run concurrently', async () => {

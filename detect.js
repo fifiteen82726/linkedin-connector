@@ -289,6 +289,20 @@ function getProfileCards() {
   ));
 }
 
+function hasConnectAction(card) {
+  return Array.from(card.querySelectorAll('button, a, [role="button"]'))
+    .some((control) => {
+      if (!isElementVisible(control) || !isControlEnabled(control)) {
+        return false;
+      }
+      const text = (control.textContent || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+      return text === 'connect';
+    });
+}
+
 function extractProfileCandidate(card) {
   const link = card.querySelector(
     'a[data-test-app-aware-link][href*="/in/"], a[href*="/in/"]'
@@ -305,7 +319,8 @@ function extractProfileCandidate(card) {
     name,
     title: titleElement ? titleElement.textContent.trim() : '',
     url,
-    card
+    card,
+    canConnect: hasConnectAction(card)
   };
 }
 
@@ -480,7 +495,7 @@ async function autoSelectProfiles() {
     await loadAdditionalPeople();
     const candidates = getProfileCards()
       .map(extractProfileCandidate)
-      .filter(Boolean);
+      .filter((candidate) => candidate && candidate.canConnect);
     updateAutoSelectStatus(`Reviewing ${candidates.length} profiles…`);
     const selectedUrls = new Set(
       selectedProfiles.map((profile) => profile.url)
