@@ -8,6 +8,10 @@ test('manifest configures LinkedIn content scripts and the batch background work
 
   assert.equal(manifest.content_scripts[0].all_frames, true);
   assert.deepEqual(manifest.content_scripts[0].matches, ['https://*.linkedin.com/*']);
+  assert.deepEqual(
+    manifest.content_scripts[0].js,
+    ['candidate-rules.js', 'detect.js'],
+  );
   assert.ok(manifest.permissions.includes('tabs'));
   assert.equal(manifest.background.service_worker, 'background.js');
 });
@@ -188,6 +192,9 @@ function loadDetect(
   };
 
   vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync('candidate-rules.js', 'utf8'), sandbox, {
+    filename: 'candidate-rules.js',
+  });
   vm.runInContext(fs.readFileSync('detect.js', 'utf8'), sandbox, {
     filename: 'detect.js',
   });
