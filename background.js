@@ -1,6 +1,53 @@
 const INVITE_MESSAGE_SOURCE = 'linkedin-invite-extension';
 const MAX_AUTOMATION_DELIVERY_ATTEMPTS = 20;
+const BATCH_JOB_STORAGE_PREFIX = 'linkedin-invite-batch-job:';
 const batchJobsByTargetTab = new Map();
+
+function getBatchJobStorageKey(targetTabId) {
+  return `${BATCH_JOB_STORAGE_PREFIX}${targetTabId}`;
+}
+
+function persistBatchJob(targetTabId, job, callback = () => {}) {
+  batchJobsByTargetTab.set(targetTabId, job);
+  chrome.storage.session.set({
+    [getBatchJobStorageKey(targetTabId)]: {
+      ...job,
+      sending: false
+    }
+  }, callback);
+}
+
+function getBatchJob(targetTabId, callback) {
+  const cachedJob = batchJobsByTargetTab.get(targetTabId);
+  if (cachedJob) {
+    callback(cachedJob);
+    return;
+  }
+
+  const storageKey = getBatchJobStorageKey(targetTabId);
+  chrome.storage.session.get(storageKey, (items) => {
+    const storedJob = items[storageKey];
+    if (!storedJob) {
+      callback(null);
+      return;
+    }
+
+    const restoredJob = {
+      ...storedJob,
+      sending: false
+    };
+    batchJobsByTargetTab.set(targetTabId, restoredJob);
+    callback(restoredJob);
+  });
+}
+
+function forgetBatchJob(targetTabId, callback = () => {}) {
+  batchJobsByTargetTab.delete(targetTabId);
+  chrome.storage.session.remove(
+    getBatchJobStorageKey(targetTabId),
+    callback
+  );
+}
 
 function relayBatchResult(job, status, reason = '') {
   chrome.tabs.sendMessage(job.sourceTabId, {
@@ -17,8 +64,7 @@ function relayBatchResult(job, status, reason = '') {
   });
 }
 
-function closeBatchTarget(targetTabId) {
-  batchJobsByTargetTab.delete(targetTabId);
+function removeBatchTargetTab(targetTabId) {
   chrome.tabs.remove(targetTabId, () => {
     if (chrome.runtime.lastError) {
       console.warn('Could not close batch profile tab:', chrome.runtime.lastError.message);
@@ -26,36 +72,46 @@ function closeBatchTarget(targetTabId) {
   });
 }
 
+function closeBatchTarget(targetTabId) {
+  forgetBatchJob(targetTabId, () => removeBatchTargetTab(targetTabId));
+}
+
 function startBatchAutomation(targetTabId) {
-  const job = batchJobsByTargetTab.get(targetTabId);
-  if (!job || job.started || job.sending) return;
-  job.sending = true;
-  job.deliveryAttempts += 1;
+  getBatchJob(targetTabId, (job) => {
+    if (!job || job.started || job.sending) return;
+    job.sending = true;
+    job.deliveryAttempts += 1;
 
-  chrome.tabs.sendMessage(targetTabId, {
-    source: INVITE_MESSAGE_SOURCE,
-    action: 'autoConnect',
-    requestId: job.requestId,
-    sourceTabId: job.sourceTabId,
-    profileUrl: job.profileUrl,
-    shouldSend: job.shouldSend
-  }, { frameId: 0 }, (response) => {
-    job.sending = false;
-    if (!chrome.runtime.lastError && response && response.accepted) {
-      job.started = true;
-      return;
-    }
+    persistBatchJob(targetTabId, job, () => {
+      chrome.tabs.sendMessage(targetTabId, {
+        source: INVITE_MESSAGE_SOURCE,
+        action: 'autoConnect',
+        requestId: job.requestId,
+        sourceTabId: job.sourceTabId,
+        profileUrl: job.profileUrl,
+        shouldSend: job.shouldSend
+      }, { frameId: 0 }, (response) => {
+        job.sending = false;
+        if (!chrome.runtime.lastError && response && response.accepted) {
+          job.started = true;
+          persistBatchJob(targetTabId, job);
+          return;
+        }
 
-    const reason = chrome.runtime.lastError
-      ? chrome.runtime.lastError.message
-      : 'Profile content script did not accept the automation command';
-    if (job.deliveryAttempts < MAX_AUTOMATION_DELIVERY_ATTEMPTS) {
-      setTimeout(() => startBatchAutomation(targetTabId), 500);
-      return;
-    }
+        const reason = chrome.runtime.lastError
+          ? chrome.runtime.lastError.message
+          : 'Profile content script did not accept the automation command';
+        if (job.deliveryAttempts < MAX_AUTOMATION_DELIVERY_ATTEMPTS) {
+          persistBatchJob(targetTabId, job, () => {
+            setTimeout(() => startBatchAutomation(targetTabId), 500);
+          });
+          return;
+        }
 
-    relayBatchResult(job, 'failed', reason);
-    closeBatchTarget(targetTabId);
+        relayBatchResult(job, 'failed', reason);
+        closeBatchTarget(targetTabId);
+      });
+    });
   });
 }
 
@@ -84,7 +140,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
 
-      batchJobsByTargetTab.set(tab.id, {
+      const job = {
         profileUrl: message.profileUrl,
         requestId: message.requestId,
         shouldSend: message.shouldSend,
@@ -92,40 +148,49 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         started: false,
         sending: false,
         deliveryAttempts: 0
-      });
-      sendResponse({ accepted: true, tabId: tab.id });
+      };
+      persistBatchJob(tab.id, job, () => {
+        sendResponse({ accepted: true, tabId: tab.id });
 
-      if (tab.status === 'complete') {
-        startBatchAutomation(tab.id);
-      }
+        if (tab.status === 'complete') {
+          startBatchAutomation(tab.id);
+        }
+      });
     });
     return true;
   }
 
   if (message.action === 'batchProfileResult' && sender.tab) {
-    const storedJob = batchJobsByTargetTab.get(sender.tab.id);
-    const sourceTabId = storedJob
-      ? storedJob.sourceTabId
-      : message.sourceTabId;
-    if (!Number.isInteger(sourceTabId) ||
-        (!storedJob && sender.frameId !== 0) ||
-        (storedJob && storedJob.requestId !== message.requestId)) {
-      return false;
-    }
+    getBatchJob(sender.tab.id, (storedJob) => {
+      const sourceTabId = storedJob
+        ? storedJob.sourceTabId
+        : message.sourceTabId;
+      if (!Number.isInteger(sourceTabId) ||
+          (!storedJob && sender.frameId !== 0) ||
+          (storedJob && storedJob.requestId !== message.requestId)) {
+        return;
+      }
 
-    const job = storedJob || {
-      profileUrl: message.profileUrl,
-      requestId: message.requestId,
-      sourceTabId
-    };
-    relayBatchResult(job, message.status, message.reason || '');
-    if (message.status === 'completed') {
-      batchJobsByTargetTab.delete(sender.tab.id);
-      setTimeout(() => closeBatchTarget(sender.tab.id), 1500);
-    } else {
-      closeBatchTarget(sender.tab.id);
-    }
-    sendResponse({ accepted: true });
+      if (sender.frameId !== 0 && message.status !== 'completed') {
+        sendResponse({ accepted: true, ignored: true });
+        return;
+      }
+
+      const job = storedJob || {
+        profileUrl: message.profileUrl,
+        requestId: message.requestId,
+        sourceTabId
+      };
+      relayBatchResult(job, message.status, message.reason || '');
+      if (message.status === 'completed') {
+        forgetBatchJob(sender.tab.id);
+        setTimeout(() => removeBatchTargetTab(sender.tab.id), 1500);
+      } else {
+        closeBatchTarget(sender.tab.id);
+      }
+      sendResponse({ accepted: true });
+    });
+    return true;
   }
 
   return false;
@@ -133,10 +198,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === 'loading') {
-    const job = batchJobsByTargetTab.get(tabId);
-    if (job) {
+    getBatchJob(tabId, (job) => {
+      if (!job) return;
       job.started = false;
-    }
+      persistBatchJob(tabId, job);
+    });
     return;
   }
 
@@ -146,9 +212,10 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  const job = batchJobsByTargetTab.get(tabId);
-  if (!job) return;
+  getBatchJob(tabId, (job) => {
+    if (!job) return;
 
-  batchJobsByTargetTab.delete(tabId);
-  relayBatchResult(job, 'failed', 'Profile tab was closed before automation completed');
+    forgetBatchJob(tabId);
+    relayBatchResult(job, 'failed', 'Profile tab was closed before automation completed');
+  });
 });

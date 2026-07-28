@@ -3,7 +3,10 @@ const fs = require('node:fs');
 const test = require('node:test');
 const vm = require('node:vm');
 
-function loadBackground({ sendMessageResponses = [] } = {}) {
+function loadBackground({
+  sendMessageResponses = [],
+  sessionStorage = {},
+} = {}) {
   const runtimeListeners = [];
   const tabUpdatedListeners = [];
   const tabRemovedListeners = [];
@@ -17,6 +20,21 @@ function loadBackground({ sendMessageResponses = [] } = {}) {
       onMessage: {
         addListener(listener) {
           runtimeListeners.push(listener);
+        },
+      },
+    },
+    storage: {
+      session: {
+        get(key, callback) {
+          callback({ [key]: sessionStorage[key] });
+        },
+        remove(key, callback) {
+          delete sessionStorage[key];
+          if (callback) callback();
+        },
+        set(items, callback) {
+          Object.assign(sessionStorage, items);
+          if (callback) callback();
         },
       },
     },
@@ -168,6 +186,43 @@ test('background accepts a final result from the LinkedIn invite child frame', (
   assert.equal(background.sentMessages[1].message.status, 'completed');
 });
 
+test('background ignores a failed result from an invite child frame', () => {
+  const background = loadBackground();
+  startBatchProfile(background);
+  background.tabUpdatedListeners[0](42, { status: 'complete' }, { id: 42 });
+
+  background.runtimeListeners[0](
+    {
+      source: 'linkedin-invite-extension',
+      action: 'batchProfileResult',
+      requestId: 'batch-1',
+      status: 'failed',
+      reason: 'add-note-button-not-found',
+      profileUrl: 'https://www.linkedin.com/preload/',
+    },
+    { frameId: 2, tab: { id: 42 } },
+    () => {},
+  );
+
+  assert.equal(background.sentMessages.length, 1);
+  assert.deepEqual(background.removedTabs, []);
+
+  background.runtimeListeners[0](
+    {
+      source: 'linkedin-invite-extension',
+      action: 'batchProfileResult',
+      requestId: 'batch-1',
+      status: 'completed',
+      profileUrl: 'https://www.linkedin.com/in/yoojin-lim/',
+    },
+    { frameId: 0, tab: { id: 42 } },
+    () => {},
+  );
+
+  assert.equal(background.sentMessages.length, 2);
+  assert.equal(background.sentMessages[1].message.status, 'completed');
+});
+
 test('background retries when the profile content script is not ready yet', () => {
   const background = loadBackground({
     sendMessageResponses: [
@@ -207,4 +262,31 @@ test('background restarts automation after the profile redirects', () => {
   assert.equal(background.sentMessages.length, 2);
   assert.equal(background.sentMessages[1].message.action, 'autoConnect');
   assert.equal(background.sentMessages[1].message.requestId, 'batch-1');
+});
+
+test('background resumes a batch after its service worker restarts', async () => {
+  const sessionStorage = {};
+  const firstWorker = loadBackground({ sessionStorage });
+  startBatchProfile(firstWorker);
+
+  assert.equal(firstWorker.sentMessages.length, 0);
+
+  const restartedWorker = loadBackground({ sessionStorage });
+  restartedWorker.tabUpdatedListeners[0](
+    42,
+    { status: 'complete' },
+    { id: 42 },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(restartedWorker.sentMessages.length, 1);
+  assert.equal(restartedWorker.sentMessages[0].tabId, 42);
+  assert.equal(
+    restartedWorker.sentMessages[0].message.action,
+    'autoConnect',
+  );
+  assert.equal(
+    restartedWorker.sentMessages[0].message.requestId,
+    'batch-1',
+  );
 });
